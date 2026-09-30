@@ -2,9 +2,9 @@
 
 When a large language model (LLM) generates text, each new token reads the stored key and value vectors of every earlier token (the KV cache) from GPU memory. At long context that memory traffic, not arithmetic, limits decoding speed.
 
-After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, but still reads every key to compute the sampling probabilities, so it saves at most half the traffic. I asked whether one could do better and avoid reading all the keys as well. It turns out one can. I developed a method, `sphere_skip`, that decides which parts of the cache to read from small summaries of the keys, and wrote GPU kernels that run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
+After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, and its Bernoulli qKᵀ sampling reduces how many features of each key are read, but it still reads part of every key to compute the sampling probabilities. I asked whether most keys could be skipped entirely. I developed a method, `sphere_skip`, that decides which parts of the cache to read from small summaries of the keys, and wrote GPU kernels that run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
 
-- **Speed:** decoding is up to 1.39× faster on Qwen3-4B and 2.4× faster on Qwen3-0.6B at long context.
+- **Speed:** at a 20% budget, decoding at 32,768 tokens is 1.30× faster on Qwen3-4B, at a TVD close to 64-sample sampling's (0.064 compared with 0.057), and 1.81× faster on Qwen3-0.6B. A 5% budget reaches 1.39× and 2.23× (2.40× at 40,448 tokens), but its fidelity at those lengths has not been measured.
 - **Fidelity:** at the accuracy of 64-sample SANTA-style sampling, it reads 0.23–0.50× as much of the cache.
 - **A negative result:** sampling the parts it skips, instead of dropping them, is worse at equal reads in every setting tested.
 
@@ -33,6 +33,10 @@ Fidelity is measured as total variation distance (TVD) between the model's next-
 | systematic sampling, 256 samples | 51.4% | 0.026 [0.023, 0.028] |
 | `sphere_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
 
+![TVD from the exact model against key and value rows read, for sphere_skip at budgets of 2–40% and systematic sampling with 64 and 256 samples](docs/tvd_vs_reads_8192.png)
+
+*The same setting across budgets of 2–40%; the two systematic-sampling points are 64 and 256 samples.*
+
 At 32,768 tokens the advantage shrinks: matching 64-sample sampling takes 0.50× its reads, and 256-sample sampling is not matched within a 40% budget. On Qwen3-0.6B it matches 64-sample sampling with 0.23–0.26× the reads, and on Python code every TVD is 2–3× lower than on WikiText. Choosing random regions instead gives 3–4× the TVD (at 2048 tokens), so the ranking does the work.
 
 *End-to-end decoding.* The whole decode step runs as a CUDA graph (one recorded sequence of GPU operations replayed per token, removing Python overhead); the exact baseline is captured the same way. BF16, one RTX 5060 Ti (16 GB), batch 1; median ms per token:
@@ -44,7 +48,7 @@ At 32,768 tokens the advantage shrinks: matching 64-sample sampling takes 0.50×
 | Qwen3-4B | 16384 | 29.1 ms | 25.5 ms (1.14×) | 24.6 ms (1.18×) |
 | Qwen3-4B | 32768 | 34.8 ms | 26.9 ms (1.30×) | 25.0 ms (1.39×) |
 
-The gain follows attention's share of the time per token: Qwen3-4B's 8 GB of weights cost ~22 ms to read, so the cache only matters at long context or when many sequences are batched.
+Fidelity at these settings: on Qwen3-4B at 32,768 tokens a 20% budget gives TVD 0.064 [0.052, 0.074] (64-sample sampling: 0.057); on Qwen3-0.6B a 10% budget already matches 64-sample sampling (0.091 compared with 0.095), and a 20% budget reads more. The 5% budget's fidelity at these lengths has not been measured. The gain follows attention's share of the time per token: Qwen3-4B's 8 GB of weights cost ~22 ms to read, so the cache only matters at long context or when many sequences are batched.
 
 *Sampling the skipped regions loses.* Reading the top regions exactly and sampling some of the rest, weighted by inverse inclusion probability, removes the bias. But at equal reads its TVD is 24–54% higher than reading more top regions, on both models and at 8192 and 32,768 tokens. Its error is almost all variance: after the top regions, the remaining attention is spread thinly over ~200 regions, and a few sampled regions estimate that tail less accurately than dropping it does.
 
@@ -70,7 +74,7 @@ Before the method above, I reproduced SANTA's sampling estimator in PyTorch and 
 - `src/ssa/harness/` — experiments: `accept_sweep` measures TVD end to end, `decode_speed` times decoding, `kernel_bench` times the kernels; others cover the sampling work. Real-model harnesses need a CUDA GPU and download the model.
 - `src/ssa/results/` — result files, each recording the git commit, GPU and library versions that produced it.
 
-Setup: `uv sync`, then `uv run python -m pytest` (244 tests; the kernel tests need a CUDA GPU and are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
+Setup: `uv sync`, then `uv run python -m pytest` (242 tests; the kernel tests need a CUDA GPU and are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
 
 ## License
 
