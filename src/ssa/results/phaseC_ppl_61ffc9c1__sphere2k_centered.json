@@ -1,0 +1,132 @@
+{
+  "git_sha": "61ffc9c1df1afb35d798560bbdece7c87f245b93",
+  "torch_version": "2.12.1+cu130",
+  "cuda_version": "13.0",
+  "python_version": "3.13.5",
+  "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5060 Ti",
+    "capability": [
+      12,
+      0
+    ],
+    "driver": "13.0"
+  },
+  "phase": "C",
+  "model": "Qwen/Qwen3-4B",
+  "dataset": "wikitext-103-v1/test",
+  "chunk_len": 2048,
+  "prefill_len": 1792,
+  "max_chunks": 8,
+  "n_runs": 3,
+  "complete": false,
+  "results": [
+    {
+      "impl": "dense",
+      "cfg": {},
+      "total_budget": null,
+      "ppl_mean": 10.823792803709072,
+      "ppl_std": 0.0,
+      "read_fraction": 1.0,
+      "kv_read_fraction": 1.0,
+      "chunk_nll": [
+        623.0196533203125,
+        714.4927368164062,
+        673.2807006835938,
+        780.84765625,
+        715.10888671875,
+        286.1938781738281,
+        437.2301330566406,
+        628.5897216796875
+      ],
+      "chunk_tokens": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255
+      ],
+      "token_count": 2040,
+      "n_runs": 1,
+      "wall_seconds": 67.72601652145386,
+      "sec_per_token": 0.03319902770659503
+    },
+    {
+      "impl": "sphere_skip",
+      "cfg": {
+        "budget": 0.05,
+        "C": 256,
+        "center": true
+      },
+      "total_budget": null,
+      "ppl_mean": 10.873238572961274,
+      "ppl_std": 0.0,
+      "read_fraction": 0.09085866957188692,
+      "kv_read_fraction": 0.22257714630991285,
+      "chunk_nll": [
+        617.4271240234375,
+        714.7294921875,
+        667.0594482421875,
+        775.9658203125,
+        720.6685791015625,
+        293.4941101074219,
+        443.81451416015625,
+        634.9022827148438
+      ],
+      "chunk_tokens": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255
+      ],
+      "token_count": 2040,
+      "n_runs": 1,
+      "wall_seconds": 277.3717966079712,
+      "sec_per_token": 0.13596656696469175
+    },
+    {
+      "impl": "sphere_skip",
+      "cfg": {
+        "budget": 0.1,
+        "C": 256,
+        "center": true
+      },
+      "total_budget": null,
+      "ppl_mean": 10.72310447388284,
+      "ppl_std": 0.0,
+      "read_fraction": 0.13919993902689837,
+      "kv_read_fraction": 0.3079825039644041,
+      "chunk_nll": [
+        612.614013671875,
+        707.279052734375,
+        664.3677978515625,
+        773.81201171875,
+        720.3646850585938,
+        292.8042297363281,
+        437.8398132324219,
+        630.6158447265625
+      ],
+      "chunk_tokens": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255
+      ],
+      "token_count": 2040,
+      "n_runs": 1,
+      "wall_seconds": 276.3190245628357,
+      "sec_per_token": 0.13545050223668417
+    }
+  ]
+}

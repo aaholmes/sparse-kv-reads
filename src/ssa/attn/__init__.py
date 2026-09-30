@@ -2,7 +2,7 @@
 
 Implementations register themselves in ``_REGISTRY`` via the ``@register`` decorator;
 ``attn`` dispatches by name. Implementations: dense, topk, santa, santa_strat, santa_sys,
-santa_hybrid, santa_block, skip_k.
+santa_hybrid, santa_block, skip_k, sphere_skip.
 """
 
 from __future__ import annotations
@@ -47,3 +47,4 @@ from . import santa as _santa  # noqa: E402,F401
 from . import hybrid as _hybrid  # noqa: E402,F401
 from . import block as _block  # noqa: E402,F401
 from . import skip_k as _skip_k  # noqa: E402,F401
+from . import sphere_skip as _sphere_skip  # noqa: E402,F401

@@ -32,6 +32,7 @@ def decode_ppl(model, chunks: list[torch.Tensor], *, prefill_len: int) -> dict:
     """
     device = next(model.parameters()).device
     total_nll, total_count, used = 0.0, 0, 0
+    chunk_nll, chunk_tokens = [], []
 
     for ids in chunks:
         ids = ids.to(device)
@@ -54,6 +55,8 @@ def decode_ppl(model, chunks: list[torch.Tensor], *, prefill_len: int) -> dict:
         nll = -log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
         total_nll += float(nll.sum().item())
         total_count += int(nll.numel())
+        chunk_nll.append(float(nll.sum().item()))
+        chunk_tokens.append(int(nll.numel()))
         del cache
 
     if total_count == 0:
@@ -64,4 +67,6 @@ def decode_ppl(model, chunks: list[torch.Tensor], *, prefill_len: int) -> dict:
         "avg_nll": avg_nll,
         "token_count": total_count,
         "chunk_count": used,
+        "chunk_nll": chunk_nll,          # per-chunk NLL sums, for paired intervals
+        "chunk_tokens": chunk_tokens,
     }

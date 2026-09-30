@@ -1,0 +1,9 @@
+{
+  "model": "Qwen/Qwen3-4B",
+  "corpus": "wikitext",
+  "S": 32,
+  "steps": 300,
+  "base_acceptance": 0.9175848598768509,
+  "final_acceptance": 0.9085369670702741,
+  "best_acceptance": 0.9175848598768509
+}

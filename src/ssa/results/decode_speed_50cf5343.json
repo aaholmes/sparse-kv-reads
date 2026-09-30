@@ -1,0 +1,267 @@
+{
+ "git_sha": "50cf53437c81f189114b3d8c18db53e67c681683",
+ "torch_version": "2.12.1+cu130",
+ "cuda_version": "13.0",
+ "python_version": "3.13.5",
+ "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 5060 Ti",
+  "capability": [
+   12,
+   0
+  ],
+  "driver": "13.0"
+ },
+ "kind": "decode_speed",
+ "model": "Qwen/Qwen3-0.6B",
+ "steps": 64,
+ "warmup": 8,
+ "repeats": 3,
+ "prefill_chunk": 512,
+ "rows": [
+  {
+   "ms_per_token_median": 9.471892356872559,
+   "ms_min": 9.466911315917969,
+   "ms_max": 9.472721099853516,
+   "ms_all": [
+    9.471892248257063,
+    9.466911531490041,
+    9.47272131088539
+   ],
+   "gpu_ms": 7.34881599999997,
+   "attention_kernels_ms": 2.5714309999999982,
+   "n": 8192,
+   "impl": "dense",
+   "cfg": {}
+  },
+  {
+   "ms_per_token_median": 17.548974990844727,
+   "ms_min": 17.3326416015625,
+   "ms_max": 20.346559524536133,
+   "ms_all": [
+    20.346560173493344,
+    17.54897449791315,
+    17.33264136055368
+   ],
+   "gpu_ms": 6.43989299999998,
+   "attention_kernels_ms": 1.1968999999999965,
+   "n": 8192,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 17.343244552612305,
+   "ms_min": 17.334611892700195,
+   "ms_max": 17.731985092163086,
+   "ms_all": [
+    17.73198435694212,
+    17.343243624054594,
+    17.334612344711786
+   ],
+   "gpu_ms": 6.110754999999979,
+   "attention_kernels_ms": 0.857022000000002,
+   "n": 8192,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 11.632671356201172,
+   "ms_min": 11.629186630249023,
+   "ms_max": 11.633040428161621,
+   "ms_all": [
+    11.633040812739637,
+    11.632671437837416,
+    11.62918665795587
+   ],
+   "gpu_ms": 9.512376999999988,
+   "attention_kernels_ms": 4.7511070000000055,
+   "n": 16384,
+   "impl": "dense",
+   "cfg": {}
+  },
+  {
+   "ms_per_token_median": 17.59015655517578,
+   "ms_min": 17.382389068603516,
+   "ms_max": 17.74414825439453,
+   "ms_all": [
+    17.59015598508995,
+    17.744148783094715,
+    17.38238962207106
+   ],
+   "gpu_ms": 6.9377479999999965,
+   "attention_kernels_ms": 1.6725569999999983,
+   "n": 16384,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 17.49149513244629,
+   "ms_min": 17.448606491088867,
+   "ms_max": 17.623537063598633,
+   "ms_all": [
+    17.623536608880386,
+    17.49149562601815,
+    17.44860643884749
+   ],
+   "gpu_ms": 6.248961000000028,
+   "attention_kernels_ms": 0.9936380000000042,
+   "n": 16384,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 16.164745330810547,
+   "ms_min": 16.16417121887207,
+   "ms_max": 16.167152404785156,
+   "ms_all": [
+    16.167152283742325,
+    16.16417060722597,
+    16.16474482943886
+   ],
+   "gpu_ms": 14.039935000000055,
+   "attention_kernels_ms": 9.263957999999999,
+   "n": 32768,
+   "impl": "dense",
+   "cfg": {}
+  },
+  {
+   "ms_per_token_median": 17.43153953552246,
+   "ms_min": 17.31597137451172,
+   "ms_max": 17.54586410522461,
+   "ms_all": [
+    17.545864826388424,
+    17.431540047255112,
+    17.315971374046057
+   ],
+   "gpu_ms": 8.077080000000011,
+   "attention_kernels_ms": 2.6874000000000025,
+   "n": 32768,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 17.451154708862305,
+   "ms_min": 17.34612274169922,
+   "ms_max": 17.47515296936035,
+   "ms_all": [
+    17.475153032137314,
+    17.346122018352617,
+    17.4511549048475
+   ],
+   "gpu_ms": 6.605146000000012,
+   "attention_kernels_ms": 1.303842000000011,
+   "n": 32768,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 18.229782104492188,
+   "ms_min": 18.22889518737793,
+   "ms_max": 18.231063842773438,
+   "ms_all": [
+    18.231063546409132,
+    18.228894845378818,
+    18.22978140626219
+   ],
+   "gpu_ms": 16.09780899999998,
+   "attention_kernels_ms": 11.319990000000008,
+   "n": 40448,
+   "impl": "dense",
+   "cfg": {}
+  },
+  {
+   "ms_per_token_median": 17.39427947998047,
+   "ms_min": 17.32038688659668,
+   "ms_max": 17.555925369262695,
+   "ms_all": [
+    17.5559257659188,
+    17.394278718711575,
+    17.320385970378993
+   ],
+   "gpu_ms": 8.602369999999985,
+   "attention_kernels_ms": 3.1835609999999868,
+   "n": 40448,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  },
+  {
+   "ms_per_token_median": 17.31328010559082,
+   "ms_min": 17.26696014404297,
+   "ms_max": 17.472444534301758,
+   "ms_all": [
+    17.472444436862133,
+    17.266959748667432,
+    17.31328003006638
+   ],
+   "gpu_ms": 6.788151000000046,
+   "attention_kernels_ms": 1.469669000000012,
+   "n": 40448,
+   "impl": "sphere_fused",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "group": "sum_share",
+    "check_every": 16,
+    "track_reads": false
+   }
+  }
+ ]
+}

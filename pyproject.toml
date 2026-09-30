@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-specd = { git = "https://github.com/aaholmes/llms", rev = "d0eb11174f2645cce0ed000a097bd7b6861f64bd" }
+specd = { git = "https://github.com/aaholmes/llms", rev = "96c47251eb2727a5636e00faf118ec91cb4addda" }
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

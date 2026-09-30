@@ -76,8 +76,98 @@ SKIPK_CONDITIONS = [
     ("santa_sys", {"S": 256}),
 ]
 
+# Sphere-skip set: fixed hypersphere partition, token 0 + recent window exact, top regions
+# by estimated max score up to a key budget, tail dropped; random-region controls at
+# matched budget; santa_sys references (read every key).
+SPHERE_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_skip", {"budget": b, "C": 256, "center": True}) for b in (0.05, 0.1, 0.2, 0.3, 0.5)]
+    + [("sphere_skip", {"budget": b, "C": 256, "center": True, "rank": "random"}) for b in (0.1, 0.3)]
+    + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
+)
+
+# Shared selection (one region set per KV head, ranked by summed per-head mass shares).
+SPHERE_SHARED_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
+       for b in (0.05, 0.1, 0.2, 0.3, 0.4)]
+)
+
+# Long-context check of shared selection: C=256 (regions ~32 keys at 8k) and C=1024
+# (~8 keys, matching the 2k region size) to separate context length from region size.
+SPHERE_SHARED_8K_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
+       for b in (0.02, 0.05, 0.1, 0.2)]
+    + [("sphere_skip", {"budget": b, "C": 1024, "center": True, "group": "sum_share"})
+       for b in (0.05, 0.1)]
+    + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
+)
+
+# 8k completion: the budgets needed to reach santa_sys S=256's TVD.
+SPHERE_SHARED_8K_HI_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.3, 0.4)]
+)
+
+# v1 incremental bins end to end: delta=0.03 (recommended) and delta=inf (never recenter).
+SPHERE_V1_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_skip_v1", {"budget": b, "C": 256, "group": "sum_share", "delta": dl})
+       for dl in (0.03, float("inf")) for b in (0.1, 0.2)]
+)
+
+# Fused Triton kernels in the engine: TVD check against the simulator results.
+SPHERE_FUSED_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+                         "check_every": 16}) for b in (0.1, 0.2)]
+)
+
+# Fused kernels at three budgets with systematic-sampling references (for other models / contexts).
+SPHERE_FUSED_REFS_CONDITIONS = (
+    [("dense", {})]
+    + [("sphere_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+                         "check_every": 16}) for b in (0.05, 0.1, 0.2)]
+    + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
+)
+
+def _fused(b, C=256):
+    return ("sphere_fused", {"budget": b, "C": C, "window": 64, "delta": 0.03, "group": "sum_share",
+                             "check_every": 16})
+
+
+# Top-k-style selection, thorough checks.
+FUSED_HI_CONDITIONS = ([("dense", {})] + [_fused(b) for b in (0.05, 0.1, 0.2, 0.3, 0.4)]
+                       + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})])
+FUSED_HI_ONLY_CONDITIONS = [("dense", {})] + [_fused(b) for b in (0.3, 0.4)]
+FUSED_C_SCAN_CONDITIONS = [("dense", {})] + [_fused(b, C) for C in (128, 512) for b in (0.1, 0.2, 0.4)]
+
+def _sample(h, S, a, C=256):
+    return ("sphere_sample", {"budget": h, "S": S, "alpha": a, "C": C, "window": 64, "delta": 0.03,
+                              "check_every": 16})
+
+
+# Sampling the unselected bins: grid at 8k, focused set at 32k; top-k 15% for matched reads.
+SAMPLE_GRID_CONDITIONS = ([("dense", {}), _fused(0.15)]
+                          + [_sample(h, S, a) for h in (0.05, 0.1, 0.2) for S in (8, 32) for a in (0.1, 0.5)])
+SAMPLE_FOCUS_CONDITIONS = [("dense", {})] + [_sample(h, S, 0.5) for h in (0.1, 0.2) for S in (8, 32)]
+# Reference: weight-only quantization of the same model, compared with BF16 on the same chunks.
+QUANT8_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 8})]
+QUANT4_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 4, "group_size": 128})]
+
 CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
-                     "skipk": SKIPK_CONDITIONS}
+                     "skipk": SKIPK_CONDITIONS, "sphere": SPHERE_CONDITIONS,
+                     "sphere_shared": SPHERE_SHARED_CONDITIONS,
+                     "sphere_shared_8k": SPHERE_SHARED_8K_CONDITIONS,
+                     "sphere_shared_8k_hi": SPHERE_SHARED_8K_HI_CONDITIONS,
+                     "sphere_v1": SPHERE_V1_CONDITIONS,
+                     "sphere_fused": SPHERE_FUSED_CONDITIONS,
+                     "sphere_fused_refs": SPHERE_FUSED_REFS_CONDITIONS,
+                     "fused_hi": FUSED_HI_CONDITIONS, "fused_hi_only": FUSED_HI_ONLY_CONDITIONS,
+                     "fused_C_scan": FUSED_C_SCAN_CONDITIONS, "sample_grid": SAMPLE_GRID_CONDITIONS,
+                     "sample_focus": SAMPLE_FOCUS_CONDITIONS, "quant8": QUANT8_CONDITIONS,
+                     "quant4": QUANT4_CONDITIONS}
 
 
 def _total_budget(impl: str, cfg: dict) -> int | None:
@@ -97,34 +187,40 @@ def _run_condition(model, chunks, impl, cfg, *, prefill_len, n_runs) -> dict:
         return {
             "impl": impl, "cfg": cfg, "total_budget": None,
             "ppl_mean": r["ppl"], "ppl_std": 0.0, "read_fraction": 1.0,
+            "kv_read_fraction": 1.0, "chunk_nll": r["chunk_nll"], "chunk_tokens": r["chunk_tokens"],
             "token_count": r["token_count"], "n_runs": 1,
             "wall_seconds": dt, "sec_per_token": dt / max(r["token_count"], 1),
         }
-    if impl == "topk":  # deterministic biased baseline — single run, reads top-k rows
-        stats = install(model, "topk", **cfg)
+    if impl in ("topk", "sphere_skip", "sphere_skip_v1", "sphere_fused", "sphere_sample"):  # single run
+        stats = install(model, impl, **cfg)
         r = decode_ppl(model, chunks, prefill_len=prefill_len)
         uninstall(model)
         dt = time.time() - t0
         return {
-            "impl": impl, "cfg": cfg, "total_budget": int(cfg.get("k", 0)),
+            "impl": impl, "cfg": cfg, "total_budget": int(cfg.get("k", 0)) if impl == "topk" else None,
             "ppl_mean": r["ppl"], "ppl_std": 0.0, "read_fraction": stats.read_fraction,
+            "kv_read_fraction": stats.kv_read_fraction,
+            "chunk_nll": r["chunk_nll"], "chunk_tokens": r["chunk_tokens"],
             "token_count": r["token_count"], "n_runs": 1,
             "wall_seconds": dt, "sec_per_token": dt / max(r["token_count"], 1),
         }
-    ppls, frac, tokens = [], 1.0, 0
+    ppls, frac, tokens, kvf, chunk_runs = [], 1.0, 0, None, []
     for run in range(n_runs):
         stats = install(model, impl, base_seed=run, **cfg)
         r = decode_ppl(model, chunks, prefill_len=prefill_len)
         ppls.append(r["ppl"])
         tokens += r["token_count"]
         frac = stats.read_fraction
+        kvf = stats.kv_read_fraction
+        chunk_runs.append(r["chunk_nll"])
         uninstall(model)
     dt = time.time() - t0
     t = torch.tensor(ppls)
     return {
         "impl": impl, "cfg": cfg, "total_budget": _total_budget(impl, cfg),
         "ppl_mean": float(t.mean()), "ppl_std": float(t.std(unbiased=False)),
-        "read_fraction": frac, "n_runs": n_runs,
+        "read_fraction": frac, "kv_read_fraction": kvf, "n_runs": n_runs,
+        "chunk_nll": [sum(x) / len(x) for x in zip(*chunk_runs)], "chunk_tokens": r["chunk_tokens"],
         "wall_seconds": dt, "sec_per_token": dt / max(tokens, 1),
     }
 

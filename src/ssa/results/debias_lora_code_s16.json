@@ -1,0 +1,9 @@
+{
+  "model": "Qwen/Qwen3-4B",
+  "corpus": "code",
+  "S": 16,
+  "steps": 300,
+  "base_acceptance": 0.9409974653785135,
+  "final_acceptance": 0.9404849214126276,
+  "best_acceptance": 0.9419998085576724
+}

@@ -1,0 +1,94 @@
+{
+  "git_sha": "61ffc9c1df1afb35d798560bbdece7c87f245b93",
+  "torch_version": "2.12.1+cu130",
+  "cuda_version": "13.0",
+  "python_version": "3.13.5",
+  "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5060 Ti",
+    "capability": [
+      12,
+      0
+    ],
+    "driver": "13.0"
+  },
+  "phase": "C",
+  "model": "Qwen/Qwen3-4B",
+  "dataset": "wikitext-103-v1/test",
+  "chunk_len": 2048,
+  "prefill_len": 1792,
+  "max_chunks": 8,
+  "n_runs": 3,
+  "complete": false,
+  "results": [
+    {
+      "impl": "dense",
+      "cfg": {},
+      "total_budget": null,
+      "ppl_mean": 10.823792803709072,
+      "ppl_std": 0.0,
+      "read_fraction": 1.0,
+      "kv_read_fraction": 1.0,
+      "chunk_nll": [
+        623.0196533203125,
+        714.4927368164062,
+        673.2807006835938,
+        780.84765625,
+        715.10888671875,
+        286.1938781738281,
+        437.2301330566406,
+        628.5897216796875
+      ],
+      "chunk_tokens": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255
+      ],
+      "token_count": 2040,
+      "n_runs": 1,
+      "wall_seconds": 83.10252070426941,
+      "sec_per_token": 0.04073652975699481
+    },
+    {
+      "impl": "sphere_skip",
+      "cfg": {
+        "budget": 0.05,
+        "C": 64
+      },
+      "total_budget": null,
+      "ppl_mean": 11.47566000977609,
+      "ppl_std": 0.0,
+      "read_fraction": 0.20433153007025293,
+      "kv_read_fraction": 0.33181206065325436,
+      "chunk_nll": [
+        631.5911865234375,
+        722.2010498046875,
+        688.3701782226562,
+        794.0546264648438,
+        729.9061279296875,
+        323.47943115234375,
+        442.85003662109375,
+        645.613037109375
+      ],
+      "chunk_tokens": [
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255,
+        255
+      ],
+      "token_count": 2040,
+      "n_runs": 1,
+      "wall_seconds": 387.7436125278473,
+      "sec_per_token": 0.19007039829796435
+    }
+  ]
+}
