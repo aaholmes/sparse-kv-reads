@@ -33,7 +33,7 @@ Fidelity is measured as total variation distance (TVD) between the model's next-
 | systematic sampling, 256 samples | 51.4% | 0.026 [0.023, 0.028] |
 | `sphere_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
 
-![TVD from the exact model against key and value rows read, for sphere_skip at budgets of 2–40% and systematic sampling with 64 and 256 samples](docs/tvd_vs_reads_8192.png)
+![TVD from the exact model versus key and value rows read, for sphere_skip at budgets of 2–40% and systematic sampling with 64 and 256 samples](docs/tvd_vs_reads_8192.png)
 
 *The same setting across budgets of 2–40%; the two systematic-sampling points are 64 and 256 samples.*
 

@@ -1,4 +1,4 @@
-"""Plot fidelity against reads: TVD from exact vs percent of K+V rows read.
+"""Plot fidelity versus reads: TVD from exact vs percent of K+V rows read.
 
 Reads one or more stamped ``tvd_*.json`` files (from ``ssa.harness.accept_sweep``),
 keeps ``sphere_skip`` at one region count and ``santa_sys``, and draws each with its
