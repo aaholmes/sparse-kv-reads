@@ -30,6 +30,7 @@ class SphereIndexGPU:
         self.check_every, self.seed, self.kind = check_every, seed, kind
         self.initialized = False
         self.n = 0
+        self.start = 1                  # binned positions are [start, end); [1, start) evicted
         self.end = 0
         self.rebuilds = 0
         self.head_steps = 0
@@ -65,8 +66,8 @@ class SphereIndexGPU:
         return lab
 
     def _build(self, K: torch.Tensor, heads: torch.Tensor, mu: torch.Tensor | None) -> None:
-        """(Re)build the bins of ``heads`` from binned keys ``K[heads, 1:end]``."""
-        Kb = K[heads, 1:self.end].to(self.dtype)                           # [h, nb, d]
+        """(Re)build the bins of ``heads`` from binned keys ``K[heads, start:end]``."""
+        Kb = K[heads, self.start:self.end].to(self.dtype)                           # [h, nb, d]
         nb = Kb.shape[1]
         if mu is None:
             mu = Kb.mean(1) if nb else torch.zeros(len(heads), self.d, dtype=self.dtype, device=self.device)
@@ -79,7 +80,7 @@ class SphereIndexGPU:
         if nb:
             Kr = Kb - mu.unsqueeze(1)
             self.rbar[heads] = Kr.pow(2).sum(-1).mean(1).sqrt()
-            self.labels[heads, 1:self.end] = self._bin(Kr, heads).to(torch.int16)
+            self.labels[heads, self.start:self.end] = self._bin(Kr, heads).to(torch.int16)
         else:
             self.rbar[heads] = 0
 
@@ -88,6 +89,7 @@ class SphereIndexGPU:
         if n > self.capacity:
             raise ValueError(f"n={n} exceeds capacity {self.capacity}")
         self._alloc(H_kv, d, _accum_dtype(K.dtype), K.device)
+        self.start = 1
         self.end = max(1, n - self.window)
         self._build(K, torch.arange(H_kv, device=K.device), None)
         self.initialized = True
@@ -101,7 +103,7 @@ class SphereIndexGPU:
             lab = self._bin(Kn - self.mu_ref.unsqueeze(1), heads)
             self.labels[:, self.end:new_end] = lab.to(torch.int16)
             self.end = new_end
-        cnt = self.end - 1
+        cnt = self.end - self.start
         self.head_steps += self.H_kv
         if cnt <= 0:
             return
@@ -147,8 +149,8 @@ class SphereIndexGPU:
         rows = H if group == "per_head" else H_kv
         w = torch.zeros(rows, C + 1, dtype=self.dtype, device=self.device)
         w[:, C] = 1.0
-        need = math.ceil(budget * (self.end - 1))
-        if self.end > 1 and need > 0:
+        need = math.ceil(budget * (self.end - self.start))
+        if self.end > self.start and need > 0:
             cdir = self.sum_dir / self.sum_dir.norm(dim=-1, keepdim=True).clamp_min(1e-12)
             p = torch.einsum("hgd,hcd->hgc", q.view(H_kv, G, d).to(self.dtype), cdir)
             e = torch.where(p >= 0, self.mmax.unsqueeze(1) * p, self.mmin.unsqueeze(1) * p)
