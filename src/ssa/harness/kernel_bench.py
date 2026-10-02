@@ -152,7 +152,17 @@ def bench_n(n: int, *, fracs, layouts, reps: int, tiles, real=None,
     return rows
 
 
-def bench_step(n: int, *, budget: float, reps: int, fused: bool = False) -> dict:
+def flashinfer_decode(q, K, V, *, tensor_cores: bool = False):
+    """FlashInfer's single-request decode attention on the engine layout ``K, V [H_kv, n, d]``.
+
+    Needs ``flashinfer-python`` and, on this sm_120 card, a CUDA >= 12.9 compiler for its JIT; e.g.
+    ``CUDA_HOME=<site-packages>/nvidia/cu13 uv run --with flashinfer-python==0.7.0.post1
+    --with nvidia-cuda-nvcc==13.0.88 --with nvidia-nvvm==13.0.88 --with nvidia-cuda-crt==13.0.88 ...``."""
+    import flashinfer
+    return flashinfer.single_decode_with_kv_cache(q, K, V, kv_layout="HND", use_tensor_cores=tensor_cores)
+
+
+def bench_step(n: int, *, budget: float, reps: int, fused: bool = False, flashinfer: bool = False) -> dict:
     """Per-layer decode step: bin maintenance + selection, attention, and both,
     eager and captured in a CUDA graph, compared with SDPA. Real Qwen3-4B keys are not
     needed for timing; random keys with a shared offset are used."""
@@ -185,8 +195,13 @@ def bench_step(n: int, *, budget: float, reps: int, fused: bool = False) -> dict
     def sdpa():
         return F.scaled_dot_product_attention(q.view(1, H, 1, D), K[:, :, :n + 1], V[:, :, :n + 1], enable_gqa=True)
 
+    fns = [("maint_select", maint_select), ("attention", attend), ("step", full), ("sdpa", sdpa)]
+    if flashinfer:
+        Kf, Vf = Kc[:, :n + 1].contiguous(), Vc[:, :n + 1].contiguous()
+        fns += [("flashinfer", lambda: flashinfer_decode(q, Kf, Vf)),
+                ("flashinfer_tc", lambda: flashinfer_decode(q, Kf, Vf, tensor_cores=True))]
     out = {"n": n, "budget": budget, "fused": fused}
-    for name, fn in (("maint_select", maint_select), ("attention", attend), ("step", full), ("sdpa", sdpa)):
+    for name, fn in fns:
         out[f"{name}_eager_us"] = time_call(fn, reps=reps) * 1e6
         for _ in range(3):
             fn()
@@ -229,11 +244,12 @@ def main() -> None:
     p.add_argument("--reps", type=int, default=100)
     p.add_argument("--real", default="src/ssa/results/multictx/wikitext03.pt")
     p.add_argument("--step", action="store_true", help="time maintenance + selection + attention per step")
+    p.add_argument("--flashinfer", action="store_true", help="with --step: also time FlashInfer's exact decode")
     args = p.parse_args()
 
     if args.step:
-        rows = [bench_step(n, budget=b, reps=args.reps, fused=fz) for n in args.ns for b in (0.2, 0.05)
-                for fz in (False, True)]
+        rows = [bench_step(n, budget=b, reps=args.reps, fused=fz, flashinfer=args.flashinfer)
+                for n in args.ns for b in (0.2, 0.05) for fz in (False, True)]
         payload = stamp({"kind": "kernel_bench_step", "geometry": {"H": H, "H_kv": H_KV, "d": D, "dtype": "bf16"},
                          "reps": args.reps, "rows": rows})
         out = Path("src/ssa/results") / f"kernel_bench_step_{payload['git_sha'][:8]}.json"

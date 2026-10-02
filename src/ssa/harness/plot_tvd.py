@@ -69,7 +69,7 @@ def plot_series(series, out) -> None:
     ax.set_xlim(0, None)
     ax.set_ylim(0, None)
     ax.grid(axis="y", alpha=0.2)
-    ax.legend(frameon=False, loc="upper right", fontsize=9)
+    ax.legend(frameon=False, loc="upper right", fontsize=9 if series.get("voronoi_tail", {}).get("x") else None)
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
