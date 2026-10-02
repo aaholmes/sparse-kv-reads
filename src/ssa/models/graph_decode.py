@@ -4,7 +4,7 @@
 engine's own modules, weights and KV cache, but with the position held in GPU memory:
 RoPE angles are gathered at that position, the new key and value are written with
 ``index_copy_``, and attention reads the current length from GPU memory
-(``DenseAttentionGraph`` or ``SphereIndexGraph``). Nothing in the step depends on a
+(``DenseAttentionGraph``, FlashInfer's paged decode, or ``SphereIndexGraph``). Nothing in the step depends on a
 Python number that changes between tokens, so it is captured once and replayed with a
 single launch per token. Recentering of the hypersphere bins (rare) runs between replays.
 
@@ -38,6 +38,10 @@ class GraphDecoder:
         if mode == "dense":
             self.attn = [DenseAttentionGraph(H=self.H, H_kv=self.H_kv, d=self.d, dtype=dtype, device=dev)
                          for _ in model.layers]
+        elif mode == "flashinfer":                                # FlashInfer's exact decode, one plan per step
+            from ..kernels.flashinfer_graph import FlashInferDecode
+            self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, page_len=cap, dtype=dtype, device=dev)
+            self.attn = None
         elif mode == "voronoi":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
                                           check_every=check_every) for _ in model.layers]
@@ -68,8 +72,12 @@ class GraphDecoder:
             kc, vc = self.cache.k[i], self.cache.v[i]
             kc.index_copy_(2, self.pos, k)
             vc.index_copy_(2, self.pos, v)
-            out = self.attn[i](q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev) if self.mode == "dense" \
-                else self.attn[i].step(q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev)
+            if self.mode == "dense":
+                out = self.attn[i](q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev)
+            elif self.mode == "flashinfer":
+                out = self.fi(q[:, :, 0, :].contiguous(), kc, vc)
+            else:
+                out = self.attn[i].step(q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev)
             h = h + a.o(out.view(1, 1, H * d))
             h = h + layer.ffn(layer.norm2(h))
         h = m.final_norm(h)
@@ -80,6 +88,8 @@ class GraphDecoder:
         warmup runs write a placeholder at the current position, which the first real step
         overwrites."""
         self.pos.fill_(self.cache.cur_len)
+        if self.mode == "flashinfer":                              # capture with the longest length
+            self.fi.plan(self.cache.max_seq_len)
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -96,6 +106,8 @@ class GraphDecoder:
         buffer the next step overwrites)."""
         self.tok.copy_(token)
         self.pos.fill_(pos)
+        if self.mode == "flashinfer":
+            self.fi.plan(pos + 1)
         if self.graph is not None:
             self.graph.replay()
         else:

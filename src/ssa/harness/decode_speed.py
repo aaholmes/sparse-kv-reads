@@ -152,7 +152,9 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=8)
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--tag", default="")
-    p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and sphere)")
+    p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and voronoi)")
+    p.add_argument("--flashinfer", action="store_true",
+                   help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
     args = p.parse_args()
 
     model = _load_model(args.model, "cuda", torch.bfloat16)
@@ -172,12 +174,12 @@ def main() -> None:
                   f"GPU {r['gpu_ms']:6.2f} ms (attention kernels {r['attention_kernels_ms']:5.2f})", flush=True)
         if args.graph:
             ref = dense_logits(model, ids, cache, n, warmup=args.warmup, steps=args.steps)
-            for mode, cfg in GRAPH_CONDITIONS:
+            for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)
                 r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg})
                 rows.append(r)
-                print(f"n={n:6d} graph_{mode:6s} budget {cfg.get('budget', 1.0):4.2f}: "
+                print(f"n={n:6d} graph_{mode:10s} budget {cfg.get('budget', 1.0):4.2f}: "
                       f"{r['ms_per_token_median']:6.2f} ms/token [{r['ms_min']:.2f}, {r['ms_max']:.2f}]  "
                       f"TVD vs engine dense {r['tvd_vs_engine_dense']:.4f}", flush=True)
         del cache
