@@ -24,7 +24,8 @@ ATTN_KERNEL_KEYS = ("flash", "fmha", "attention", "sdpa", "_bin_kernel", "_score
 
 
 def prefill(model, ids: torch.Tensor, n: int, *, chunk: int = 512):
-    cache = model.alloc_cache(-(-(ids.shape[1] + 1) // 16) * 16)          # FlashInfer pages are 16 tokens
+    cache = model.alloc_cache(-(-(ids.shape[1] + 1) // 16) * 16,          # FlashInfer pages are 16 tokens
+                              max_batch=ids.shape[0])
     with torch.inference_mode():
         for s in range(0, n, chunk):
             model(ids[:, s:min(s + chunk, n)], cache, start_pos=s)
@@ -75,7 +76,7 @@ def time_graph(model, ids, cache, n, mode, cfg, *, warmup: int, steps: int, repe
             for t in range(n + warmup, n + warmup + steps):
                 lg = dec.step(ids[:, t:t + 1], t)
                 if ref_logits is not None and r == 0:
-                    got.append(lg[0, -1].float().clone())
+                    got.append(lg[:, -1].float().clone())                # [B, vocab]
             torch.cuda.synchronize()
         ms.append((time.perf_counter() - t0) / steps * 1e3)
         if got:
@@ -95,7 +96,7 @@ def dense_logits(model, ids, cache, n, *, warmup: int, steps: int) -> torch.Tens
         for t in range(n, n + warmup + steps):
             lg = model(ids[:, t:t + 1], cache)
             if t >= n + warmup:
-                out.append(lg[0, -1].float().clone())
+                out.append(lg[:, -1].float().clone())
     return torch.stack(out)
 
 
@@ -152,6 +153,7 @@ def main() -> None:
     p.add_argument("--warmup", type=int, default=8)
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--tag", default="")
+    p.add_argument("--batch", type=int, default=1, help="sequences decoded together (equal lengths)")
     p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and voronoi)")
     p.add_argument("--flashinfer", action="store_true",
                    help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
@@ -160,14 +162,15 @@ def main() -> None:
     model = _load_model(args.model, "cuda", torch.bfloat16)
     rows = []
     for n in args.ns:
-        ids = random_wikitext_chunks(args.model, n=1, length=n + args.warmup + args.steps + 8, seed=n)[0].cuda()
+        ids = torch.cat(random_wikitext_chunks(args.model, n=args.batch, length=n + args.warmup + args.steps + 8,
+                                               seed=n)).cuda()                          # [batch, length]
         cache = prefill(model, ids, n)
         conds = CONDITIONS[:1] if args.graph else CONDITIONS
         for impl, cfg in conds:
             r = time_condition(model, ids, cache, n, impl, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats)
             r.update(profile_step(model, ids, cache, n, impl, cfg))
-            r.update({"n": n, "impl": impl, "cfg": cfg})
+            r.update({"n": n, "impl": impl, "cfg": cfg, "batch": args.batch})
             rows.append(r)
             print(f"n={n:6d} {impl:12s} budget {cfg.get('budget', 1.0):4.2f}: "
                   f"{r['ms_per_token_median']:6.2f} ms/token [{r['ms_min']:.2f}, {r['ms_max']:.2f}]  "
@@ -177,14 +180,15 @@ def main() -> None:
             for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)
-                r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg})
+                r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg, "batch": args.batch,
+                          "tokens_per_s": 1e3 * args.batch / r["ms_per_token_median"]})
                 rows.append(r)
-                print(f"n={n:6d} graph_{mode:10s} budget {cfg.get('budget', 1.0):4.2f}: "
-                      f"{r['ms_per_token_median']:6.2f} ms/token [{r['ms_min']:.2f}, {r['ms_max']:.2f}]  "
-                      f"TVD vs engine dense {r['tvd_vs_engine_dense']:.4f}", flush=True)
+                print(f"B={args.batch} n={n:6d} graph_{mode:10s} budget {cfg.get('budget', 1.0):4.2f}: "
+                      f"{r['ms_per_token_median']:6.2f} ms/step [{r['ms_min']:.2f}, {r['ms_max']:.2f}]  "
+                      f"{r['tokens_per_s']:7.1f} tok/s  TVD vs engine dense {r['tvd_vs_engine_dense']:.4f}", flush=True)
         del cache
         torch.cuda.empty_cache()
-    payload = stamp({"kind": "decode_speed", "model": args.model, "steps": args.steps, "warmup": args.warmup,
+    payload = stamp({"kind": "decode_speed", "model": args.model, "batch": args.batch, "steps": args.steps, "warmup": args.warmup,
                      "repeats": args.repeats, "prefill_chunk": 512, "rows": rows})
     out = Path("src/ssa/results") / f"decode_speed_{payload['git_sha'][:8]}{args.tag}.json"
     out.write_text(json.dumps(payload, indent=1))

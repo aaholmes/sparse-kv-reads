@@ -10,6 +10,11 @@ single launch per token. Recentering of the hypersphere bins (rare) runs between
 
 The prompt is processed by the engine as usual; ``prepare(n)`` then builds the attention
 state from the first ``n`` cached positions.
+
+Batching: the engine's cache holds ``B = max_batch`` sequences of equal length. Each (sequence,
+KV head) pair is independent in every attention mode here, so the batch is presented to the
+attention kernels as one sequence with ``B·H_kv`` KV heads: the cache ``[B, H_kv, L, d]`` is
+viewed as ``[B·H_kv, L, d]`` and the queries ``[B, H, d]`` as ``[B·H, d]``, without copying.
 """
 
 from __future__ import annotations
@@ -27,20 +32,22 @@ class GraphDecoder:
         cfg = model.cfg
         self.model, self.cache, self.mode = model, cache, mode
         self.H, self.H_kv, self.d = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
+        self.B = B = cache.k[0].shape[0]
         p = next(model.parameters())
         dev, dtype = p.device, p.dtype
-        self.tok = torch.zeros(1, 1, dtype=torch.long, device=dev)
+        self.tok = torch.zeros(B, 1, dtype=torch.long, device=dev)
         self.pos = torch.zeros(1, dtype=torch.long, device=dev)
         self.n_dev = torch.zeros(1, dtype=torch.int32, device=dev)
         cap = cache.max_seq_len
         mode = "voronoi" if mode == "sphere" else mode           # old name
         self.mode = mode
         if mode == "dense":
-            self.attn = [DenseAttentionGraph(H=self.H, H_kv=self.H_kv, d=self.d, dtype=dtype, device=dev)
+            self.attn = [DenseAttentionGraph(H=B * self.H, H_kv=B * self.H_kv, d=self.d, dtype=dtype, device=dev)
                          for _ in model.layers]
         elif mode == "flashinfer":                                # FlashInfer's exact decode, one plan per step
             from ..kernels.flashinfer_graph import FlashInferDecode
-            self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, max_len=cap, dtype=dtype, device=dev)
+            self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, max_len=cap, dtype=dtype, device=dev,
+                                       batch=B)
             self.attn = None
         elif mode == "voronoi":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
@@ -54,31 +61,36 @@ class GraphDecoder:
         """Build attention state from the first ``n`` cached positions (after prefill)."""
         if self.mode == "voronoi":
             for i, idx in enumerate(self.attn):
-                idx.prepare(self.cache.k[i][0], n, self.H)
+                idx.prepare(self._heads(self.cache.k[i]), n, self.B * self.H)
+
+    def _heads(self, c: torch.Tensor) -> torch.Tensor:
+        """Cache ``[B, H_kv, L, d]`` -> ``[B·H_kv, L, d]`` (a view)."""
+        return c.view(-1, c.shape[2], c.shape[3])
 
     def _body(self) -> torch.Tensor:
-        m, H, H_kv, d = self.model, self.H, self.H_kv, self.d
+        m, H, H_kv, d, B = self.model, self.H, self.H_kv, self.d, self.B
         self.n_dev.copy_(self.pos + 1)
-        h = m.embed(self.tok)                                              # [1, 1, hidden]
+        h = m.embed(self.tok)                                              # [B, 1, hidden]
         cos = m.rope_cos.index_select(0, self.pos)
         sin = m.rope_sin.index_select(0, self.pos)
         for i, layer in enumerate(m.layers):
             a = layer.attn
             x = layer.norm1(h)
-            q = a.q_norm(a.q(x).view(1, 1, H, d)).transpose(1, 2)
-            k = a.k_norm(a.k(x).view(1, 1, H_kv, d)).transpose(1, 2)
-            v = a.v(x).view(1, 1, H_kv, d).transpose(1, 2)
+            q = a.q_norm(a.q(x).view(B, 1, H, d)).transpose(1, 2)
+            k = a.k_norm(a.k(x).view(B, 1, H_kv, d)).transpose(1, 2)
+            v = a.v(x).view(B, 1, H_kv, d).transpose(1, 2)
             q, k = apply_rope(q, k, cos, sin)
             kc, vc = self.cache.k[i], self.cache.v[i]
             kc.index_copy_(2, self.pos, k)
             vc.index_copy_(2, self.pos, v)
+            qh = q[:, :, 0, :].contiguous()                                # [B, H, d]
             if self.mode == "dense":
-                out = self.attn[i](q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev)
+                out = self.attn[i](qh.view(B * H, d), self._heads(kc), self._heads(vc), self.n_dev)
             elif self.mode == "flashinfer":
-                out = self.fi(q[:, :, 0, :].contiguous(), kc, vc)
+                out = self.fi(qh, kc, vc)
             else:
-                out = self.attn[i].step(q[0, :, 0, :].contiguous(), kc[0], vc[0], self.n_dev)
-            h = h + a.o(out.view(1, 1, H * d))
+                out = self.attn[i].step(qh.view(B * H, d), self._heads(kc), self._heads(vc), self.n_dev)
+            h = h + a.o(out.reshape(B, 1, H * d))
             h = h + layer.ffn(layer.norm2(h))
         h = m.final_norm(h)
         return h @ m.embed.weight.T if m.lm_head is None else m.lm_head(h)
@@ -102,7 +114,7 @@ class GraphDecoder:
         self.graph = g
 
     def step(self, token: torch.Tensor, pos: int) -> torch.Tensor:
-        """Decode ``token [1, 1]`` at position ``pos``; returns logits ``[1, 1, vocab]`` (a
+        """Decode ``token [B, 1]`` at position ``pos``; returns logits ``[B, 1, vocab]`` (a
         buffer the next step overwrites)."""
         self.tok.copy_(token)
         self.pos.fill_(pos)
@@ -114,6 +126,6 @@ class GraphDecoder:
             self.logits = self._body()
         if self.mode == "voronoi":
             for i, idx in enumerate(self.attn):
-                idx.after_replay(self.cache.k[i][0])
+                idx.after_replay(self._heads(self.cache.k[i]))
         self.cache.cur_len = pos + 1
         return self.logits
