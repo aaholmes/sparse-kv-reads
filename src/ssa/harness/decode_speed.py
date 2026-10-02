@@ -24,7 +24,7 @@ ATTN_KERNEL_KEYS = ("flash", "fmha", "attention", "sdpa", "_bin_kernel", "_score
 
 
 def prefill(model, ids: torch.Tensor, n: int, *, chunk: int = 512):
-    cache = model.alloc_cache(ids.shape[1] + 1)
+    cache = model.alloc_cache(-(-(ids.shape[1] + 1) // 16) * 16)          # FlashInfer pages are 16 tokens
     with torch.inference_mode():
         for s in range(0, n, chunk):
             model(ids[:, s:min(s + chunk, n)], cache, start_pos=s)

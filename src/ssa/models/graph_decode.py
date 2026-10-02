@@ -40,7 +40,7 @@ class GraphDecoder:
                          for _ in model.layers]
         elif mode == "flashinfer":                                # FlashInfer's exact decode, one plan per step
             from ..kernels.flashinfer_graph import FlashInferDecode
-            self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, page_len=cap, dtype=dtype, device=dev)
+            self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, max_len=cap, dtype=dtype, device=dev)
             self.attn = None
         elif mode == "voronoi":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,

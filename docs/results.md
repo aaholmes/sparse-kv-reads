@@ -68,14 +68,16 @@ Region maintenance and selection cost ~25 µs per step at any context length. Ga
 
 ## End-to-end decoding
 
-The kernels run inside the inference engine, one region index per layer, reading the KV cache in place, and match the offline fidelity (8192 tokens: TVD 0.063 [0.054, 0.073] at a 10% budget and 0.044 [0.037, 0.051] at 20%, compared with 0.063 and 0.043 offline). At batch 1 the engine's Python overhead per token exceeded the GPU time for Qwen3-0.6B, so the whole decode step is captured in a CUDA graph, with every step-dependent number (position, number of assigned keys, budget) kept in GPU memory. Median ms per token over 3 repeats of 64 steps (repeats within ±0.5 ms):
+The kernels run inside the inference engine, one region index per layer, reading the KV cache in place, and match the offline fidelity (8192 tokens: TVD 0.063 [0.054, 0.073] at a 10% budget and 0.044 [0.037, 0.051] at 20%, compared with 0.063 and 0.043 offline). At batch 1 the engine's Python overhead per token exceeded the GPU time for Qwen3-0.6B, so the whole decode step is captured in a CUDA graph, with every step-dependent number (position, number of assigned keys, budget) kept in GPU memory. Median ms per token over 3 repeats of 64 steps:
 
 | model | context | exact attention | 20% budget | 5% budget |
 |---|---|---|---|---|
-| Qwen3-0.6B | 16384 | 9.6 ms | 6.8 ms (1.42×) | 6.0 ms (1.60×) |
-| Qwen3-0.6B | 32768 | 14.1 ms | 7.8 ms (1.81×) | 6.3 ms (2.23×) |
-| Qwen3-0.6B | 40448 | 16.0 ms | 8.3 ms (1.93×) | 6.7 ms (2.40×) |
-| Qwen3-4B | 16384 | 29.1 ms | 25.5 ms (1.14×) | 24.6 ms (1.18×) |
-| Qwen3-4B | 32768 | 34.8 ms | 26.9 ms (1.30×) | 25.0 ms (1.39×) |
+| Qwen3-0.6B | 16384 | 9.8 ms | 6.7 ms (1.46×) | 6.1 ms (1.61×) |
+| Qwen3-0.6B | 32768 | 14.5 ms | 7.8 ms (1.85×) | 6.3 ms (2.30×) |
+| Qwen3-0.6B | 40448 | 16.6 ms | 8.3 ms (2.01×) | 6.5 ms (2.55×) |
+| Qwen3-4B | 16384 | 29.4 ms | 25.5 ms (1.15×) | 24.6 ms (1.19×) |
+| Qwen3-4B | 32768 | 35.1 ms | 26.8 ms (1.31×) | 25.0 ms (1.41×) |
+
+The exact baseline is FlashInfer's paged decode in the same CUDA graph (`decode_speed --graph --flashinfer`, `ssa.kernels.flashinfer_graph`); it reads the engine's contiguous cache in place through a strided view as 16-token pages. End to end it is 1–4% slower than the engine's own exact Triton kernel, although per layer it is slightly faster, probably because of its host-side plan before each token.
 
 Reading the weights costs a fixed amount per token (8 GB for Qwen3-4B, ~22 ms; 1.2 GB for Qwen3-0.6B), and the cache's size reaches the weights' at ~54k tokens for Qwen3-4B and ~10k for Qwen3-0.6B, or proportionally sooner with batching. The method pays most when the weights are small relative to the cache: long context, batched serving, or smaller models. Graph-captured exact decoding differs from the engine's standard attention by TVD ~0.01 through BF16 rounding. During this work the engine's own exact-attention decode was made up to 2.6× faster by sharing KV heads across query heads instead of copying the cache.

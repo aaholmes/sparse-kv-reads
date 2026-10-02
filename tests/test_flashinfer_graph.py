@@ -19,7 +19,7 @@ def _logits(mode, capture, dtype=torch.bfloat16, seed=0):
     model = tiny_model(CFG, seed=seed).to("cuda").to(dtype).eval()
     ids = torch.randint(0, CFG.vocab_size, (1, P + T + 1), device="cuda",
                         generator=torch.Generator(device="cuda").manual_seed(seed))
-    cache = model.alloc_cache(P + T + 2, dtype=dtype)
+    cache = model.alloc_cache(-(-(P + T + 2) // 16) * 16, dtype=dtype)
     out = []
     with torch.inference_mode():
         model(ids[:, :P], cache, start_pos=0)
@@ -45,3 +45,19 @@ def test_flashinfer_is_as_close_to_float32_as_the_engine_exact_kernel(capture):
     err_fi = (_logits("flashinfer", capture) - ref).abs()
     assert err_fi.mean() <= 1.2 * err_dense.mean() and err_fi.max() <= 1.5 * err_dense.max()
     assert err_fi.max() < 0.01 * ref.abs().max()
+
+
+def test_paged_view_reads_each_sequence_in_place():
+    from ssa.kernels.flashinfer_graph import FlashInferDecode
+    B, H, H_kv, d, L = 3, 8, 2, 128, 160
+    g = torch.Generator(device="cuda").manual_seed(0)
+    K = torch.randn(B, H_kv, L, d, device="cuda", dtype=torch.bfloat16, generator=g)
+    V = torch.randn_like(K)
+    q = torch.randn(B, H, d, device="cuda", dtype=torch.bfloat16, generator=g)
+    fi = FlashInferDecode(H=H, H_kv=H_kv, d=d, max_len=L, dtype=torch.bfloat16, device="cuda", batch=B)
+    for n in (1, 17, 100, 160):
+        fi.plan(n)
+        out = fi(q, K, V)
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.unsqueeze(2).float(), K[:, :, :n].float(), V[:, :, :n].float(), enable_gqa=True).squeeze(2)
+        torch.testing.assert_close(out.float(), ref, rtol=2e-2, atol=2e-2)
