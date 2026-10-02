@@ -1,12 +1,32 @@
 # Efficient inference by reducing KV cache reads
 
-When a large language model (LLM) generates text, each new token reads the stored key and value vectors of every earlier token (the KV cache) from GPU memory. At long context that memory traffic, not arithmetic, limits decoding speed.
+Decoding at long context is limited by reading the KV cache: every new token re-reads the stored key and value vectors of every earlier token. After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, but still reads part of every key to compute the sampling probabilities. I asked whether most keys could be skipped entirely. I developed `voronoi_skip`, a training-free method that decides which parts of the cache to read from small running summaries of the keys, wrote Triton kernels for it, and run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
 
-After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, and its Bernoulli qKᵀ sampling reduces how many features of each key are read, but it still reads part of every key to compute the sampling probabilities. I asked whether most keys could be skipped entirely. I developed a method, `voronoi_skip`, that decides which parts of the cache to read from small summaries of the keys, and wrote GPU kernels that run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
+## Status (October 2026)
 
-- **Speed:** at a 20% budget, decoding at 32,768 tokens is 1.30× faster on Qwen3-4B, at a TVD close to 64-sample sampling's (0.064 compared with 0.057), and 1.81× faster on Qwen3-0.6B. A 5% budget reaches 1.39× and 2.23× (2.40× at 40,448 tokens) at a clear fidelity cost: TVD 0.111 on Qwen3-4B and 0.133 on Qwen3-0.6B at 32,768 tokens, between Qwen3-4B with 8-bit (0.018) and naive 4-bit (0.144) weights, measured at 8,192 tokens.
-- **Fidelity:** at the accuracy of 64-sample SANTA-style sampling, it reads 0.23–0.50× as much of the cache.
-- **A negative result:** sampling the parts it skips, instead of dropping them, is worse at equal reads in every setting tested.
+BF16, batch 1, one RTX 5060 Ti (16 GB, 448 GB/s). "Budget" is the fraction of keys the method reads.
+
+**Attention only** (one layer, Qwen3-4B head layout, µs per decode step; ours includes choosing what to read):
+
+| context | exact, FlashInfer | `voronoi_skip`, 20% budget | `voronoi_skip`, 5% budget |
+|---|---|---|---|
+| 8,192 | 92 | 55 (1.7× faster) | 45 (2.1×) |
+| 32,768 | 337 | 109 (3.1×) | 57 (5.9×) |
+| 65,536 | 660 | 182 (3.6×) | 80 (8.3×) |
+
+**End-to-end decoding** (whole model, 32,768-token context, ms per token). The exact baseline is the engine's own exact-attention kernel, measured within 1.2% of FlashInfer at this length. Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's, with 95% intervals over 8 WikiText chunks, and how often both pick the same top token:
+
+| model | exact | 20% budget | 5% budget |
+|---|---|---|---|
+| Qwen3-4B: speed | 34.8 ms | 26.9 ms (1.30× faster) | 25.0 ms (1.39×) |
+| Qwen3-4B: fidelity | — | TVD 0.064 [0.052, 0.074]; top-1 92.3% | TVD 0.111 [0.093, 0.127]; top-1 86.9% |
+| Qwen3-0.6B: speed | 14.1 ms | 7.8 ms (1.81×) | 6.3 ms (2.23×) |
+| Qwen3-0.6B: fidelity | — | TVD 0.061 [0.051, 0.072]; top-1 92.0% | TVD 0.133 [0.116, 0.147]; top-1 84.8% |
+
+- **Attention gets much faster, and more so at longer context.** FlashInfer already reads the cache at 81–91% of the card's bandwidth, so the gain comes from reading less, not from a faster kernel.
+- **End to end, the weights limit the gain at batch 1.** Reading Qwen3-4B's 8 GB of weights takes ~22 ms of each token's 34.8 ms, so even free attention could not exceed about 1.6×. Batched serving reads the weights once per batch and each sequence's cache separately, so it should keep more of the attention speedup; that is not yet measured.
+- **Fidelity costs something.** A 20% budget is about as close to the exact model as 64-sample SANTA-style sampling (TVD 0.057), which reads every key; a 5% budget lies between 8-bit and naive 4-bit weight quantization of Qwen3-4B (TVD 0.018 and 0.144, measured at 8,192 tokens).
+- **Not yet done:** batched kernels and paged KV caches; comparison with FlashInfer's batched decode; task benchmarks (RULER, LongBench); direct comparison with Quest and ClusterKV; datacenter GPUs.
 
 ## Method
 
@@ -39,7 +59,18 @@ Fidelity is measured as total variation distance (TVD) between the model's next-
 
 At 32,768 tokens the advantage shrinks: matching 64-sample sampling takes 0.50× its reads, and 256-sample sampling is not matched within a 40% budget. On Qwen3-0.6B it matches 64-sample sampling with 0.23–0.26× the reads, and on Python code every TVD is 2–3× lower than on WikiText. Choosing random regions instead gives 3–4× the TVD (at 2048 tokens), so the ranking does the work.
 
-*End-to-end decoding.* The whole decode step runs as a CUDA graph (one recorded sequence of GPU operations replayed per token, removing Python overhead); the exact baseline is captured the same way. BF16, one RTX 5060 Ti (16 GB), batch 1; median ms per token:
+*Attention per layer, compared with FlashInfer.* FlashInfer is the exact decode-attention library used by serving engines such as SGLang. One layer, Qwen3-4B head layout, BF16, batch 1, both sides in CUDA graphs, L2 cache flushed, median of 100 calls; our step includes region maintenance and selection:
+
+| context | FlashInfer | `voronoi_skip`, 20% budget | `voronoi_skip`, 5% budget |
+|---|---|---|---|
+| 8192 | 92 µs | 55 µs (1.67×) | 45 µs (2.06×) |
+| 16384 | 174 µs | 74 µs (2.36×) | 49 µs (3.56×) |
+| 32768 | 337 µs | 109 µs (3.11×) | 57 µs (5.89×) |
+| 65536 | 660 µs | 182 µs (3.63×) | 80 µs (8.25×) |
+
+FlashInfer reads the cache at 364–407 GB/s, close to the card's nominal 448 GB/s, and PyTorch's own attention is within 2–8% of it: exact decode is limited by memory bandwidth, so the remaining gain has to come from reading less.
+
+*End-to-end decoding.* The whole decode step runs as a CUDA graph (one recorded sequence of GPU operations replayed per token, removing Python overhead); the exact baseline is captured the same way, using the engine's own exact-attention kernel, which is 0.3–9% slower than FlashInfer per layer (9% at 8,192 tokens, 1.2% at 32,768). BF16, one RTX 5060 Ti (16 GB), batch 1; median ms per token:
 
 | model | context | exact attention | 20% budget | 5% budget |
 |---|---|---|---|---|
@@ -58,10 +89,6 @@ More detail, including kernel timings, context-length and region-count scans, an
 
 After building this, I found that it is close in spirit to ClusterKV ([arXiv:2412.03213](https://arxiv.org/abs/2412.03213)), which also groups keys by direction (with k-means clustering) and reads the top groups exactly. The differences are that here keys are mean-centered first, the groups come from fixed random directions updated incrementally instead of periodic clustering, groups are scored by mean direction times maximum or minimum length, one selection is shared by the query heads of each KV head, and a recent window is always read. Quest ([arXiv:2406.10774](https://arxiv.org/abs/2406.10774)) selects fixed 16-token pages using per-page minimum and maximum keys. MagicPIG ([arXiv:2410.16179](https://arxiv.org/abs/2410.16179)) also centers keys, then samples them with locality-sensitive hashing (hashes that put similar vectors in the same bucket). SANTA++ ([arXiv:2609.35629](https://arxiv.org/abs/2609.35629)), from SANTA's authors, samples groups of keys.
 
-## Limits and next steps
-
-Fidelity is measured as TVD on WikiText and Python code, up to 32,768 tokens, on two models of one family; task benchmarks (such as RULER or LongBench) were not run, and there is no direct comparison with ClusterKV or Quest yet. Speed is measured at batch 1 on one consumer GPU. Next: compare with ClusterKV- and Quest-style selection at equal reads, test SANTA++-style sampling, measure task accuracy, and support batching.
-
 ## Earlier work: sampling the cache
 
 Before the method above, I reproduced SANTA's sampling estimator in PyTorch and tested extensions of it: exact computation of the heaviest tokens, contiguous-block sampling, cluster-based key skipping, and a learned correction for sampling bias. Plain systematic sampling matches exact perplexity within +0.19% while reading 3.5% of cached values; none of the extensions beat it. Details are in [docs/sampling.md](docs/sampling.md).
@@ -74,7 +101,7 @@ Before the method above, I reproduced SANTA's sampling estimator in PyTorch and 
 - `src/ssa/harness/` — experiments: `accept_sweep` measures TVD end to end, `decode_speed` times decoding, `kernel_bench` times the kernels; others cover the sampling work. Real-model harnesses need a CUDA GPU and download the model.
 - `src/ssa/results/` — result files, each recording the git commit, GPU and library versions that produced it.
 
-Setup: `uv sync`, then `uv run python -m pytest` (242 tests; the kernel tests need a CUDA GPU and are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
+Setup: `uv sync`, then `uv run python -m pytest` (265 tests; the kernel tests need a CUDA GPU and the FlashInfer comparison needs FlashInfer, and both are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
 
 ## License
 

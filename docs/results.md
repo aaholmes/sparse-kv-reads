@@ -53,13 +53,16 @@ Why: split attention into the top set (weight f, mean value μ_H) and the rest (
 
 ## Kernels and timing
 
-Three Triton kernels (Triton is a Python-embedded language for writing GPU kernels) maintain and choose regions: they assign the key leaving the recent window, score the regions, and select up to the budget without sorting. Two more compact the selected positions into a list and run split attention over it (flash-decoding). One layer, Qwen3-4B head layout, BF16, RTX 5060 Ti; median of 100 calls with the L2 cache flushed, both sides in CUDA graphs; exact attention is PyTorch's scaled dot-product attention:
+Three Triton kernels (Triton is a Python-embedded language for writing GPU kernels) maintain and choose regions: they assign the key leaving the recent window, score the regions, and select up to the budget without sorting. Two more compact the selected positions into a list and run split attention over it (flash-decoding). One layer, Qwen3-4B head layout, BF16, RTX 5060 Ti; median of 100 calls with the L2 cache flushed, both sides in CUDA graphs; exact attention by PyTorch's scaled dot-product attention (SDPA) and by FlashInfer (`kernel_bench --step --flashinfer`):
 
-| context | exact attention | whole step, 20% of rows | whole step, 5% of rows |
-|---|---|---|---|
-| 8192 | 98 µs | 66 µs (1.5×) | 55 µs (1.8×) |
-| 32768 | 342 µs | 119 µs (2.9×) | 68 µs (5.1×) |
-| 65536 | 671 µs | 191 µs (3.5×) | 90 µs (7.5×) |
+| context | SDPA | FlashInfer | whole step, 20% of rows | whole step, 5% of rows |
+|---|---|---|---|---|
+| 8192 | 100 µs | 92 µs | 55 µs (1.67×) | 45 µs (2.06×) |
+| 16384 | 180 µs | 174 µs | 74 µs (2.36×) | 49 µs (3.56×) |
+| 32768 | 344 µs | 337 µs | 109 µs (3.11×) | 57 µs (5.89×) |
+| 65536 | 670 µs | 660 µs | 182 µs (3.63×) | 80 µs (8.25×) |
+
+Speedups are relative to FlashInfer, which reads the cache at 364–407 GB/s of the card's nominal 448 GB/s. To run it on this card (sm_120), FlashInfer's compiler must be CUDA 13; the `flashinfer_decode` docstring in `kernel_bench.py` gives the command.
 
 Region maintenance and selection cost ~25 µs per step at any context length. Gathering scattered 256-byte rows costs at most ~1.5× per byte compared with contiguous reads on this card. About 50 µs of fixed cost per step makes the method slower than exact attention below ~4–5k tokens.
 
