@@ -2,7 +2,7 @@
 
 Implementations register themselves in ``_REGISTRY`` via the ``@register`` decorator;
 ``attn`` dispatches by name. Implementations: dense, topk, santa, santa_strat, santa_sys,
-santa_hybrid, santa_block, skip_k, sphere_skip.
+santa_hybrid, santa_block, skip_k, voronoi_skip.
 """
 
 from __future__ import annotations
@@ -12,6 +12,16 @@ from typing import Callable
 import torch
 
 _REGISTRY: dict[str, Callable] = {}
+
+# The key-skipping method was renamed from ``sphere_*`` to ``voronoi_*``; result files written
+# before the rename record the old names, which are still accepted everywhere.
+LEGACY_NAMES = {"sphere_skip": "voronoi_skip", "sphere_skip_v1": "voronoi_skip_v1", "sphere_fused": "voronoi_fused",
+                "sphere_sample": "voronoi_sample", "sphere_tail": "voronoi_tail"}
+
+
+def canonical(name: str) -> str:
+    """The current name for an implementation name, old or new."""
+    return LEGACY_NAMES.get(name, name)
 
 
 def register(name: str) -> Callable:
@@ -34,7 +44,7 @@ def available() -> list[str]:
 def attn(q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, *, impl: str, **cfg):
     """Dispatch to a registered attention implementation by name."""
     try:
-        fn = _REGISTRY[impl]
+        fn = _REGISTRY[canonical(impl)]
     except KeyError:
         raise KeyError(f"unknown attn impl {impl!r}; available: {available()}") from None
     return fn(q, K, V, **cfg)

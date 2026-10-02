@@ -19,7 +19,7 @@ import torch
 
 from engine.attention import Attention
 
-from ..attn import attn
+from ..attn import attn, canonical
 from ..sampling.draws import unique_counts
 
 _SAMPLING_IMPLS = {"santa", "santa_strat", "santa_sys", "santa_hybrid", "skip_k"}
@@ -97,18 +97,19 @@ def _seed(base_seed: int, layer_idx: int, step: int) -> int:
 
 def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
     """Build a decode-seam callback for ``impl`` (closure owns its step counter)."""
+    impl = canonical(impl)
     is_sampling = impl in _SAMPLING_IMPLS
     k_h = int(cfg.get("k_h", 0))
     counter = {"step": 0}
     state = None
-    if impl == "sphere_skip_v1":                        # one incremental state per layer
+    if impl == "voronoi_skip_v1":                        # one incremental state per layer
         from ..attn.sphere_state import SphereState
         state = SphereState(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                             delta=float(cfg.get("delta", 0.0)), seed=int(cfg.get("seed", 0)),
                             kind=cfg.get("kind", "random"))
 
     fused = None
-    if impl in ("sphere_fused", "sphere_sample"):       # fused Triton kernels, one index per layer
+    if impl in ("voronoi_fused", "voronoi_sample"):       # fused Triton kernels, one index per layer
         from ..kernels.sphere_fused import SphereIndexFused
         fused = SphereIndexFused(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                                  delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
@@ -117,7 +118,7 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         fused_prev = {"rebuilds": 0, "head_steps": 0}
 
     tail = None
-    if impl == "sphere_tail":                          # estimated dropped bins, pure PyTorch, one index per layer
+    if impl == "voronoi_tail":                          # estimated dropped bins, pure PyTorch, one index per layer
         from ..attn.tail_estimate import SphereIndexTail
         tail = SphereIndexTail(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                                delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
@@ -150,7 +151,7 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         if fused is not None:                       # reads the cache in place: [H_kv, n, d] views, no copy
             Kc, Vc = full_k[0], full_v[0]
             n_k = Kc.shape[1]
-            if impl == "sphere_sample":                 # sample S of the unselected bins
+            if impl == "voronoi_sample":                 # sample S of the unselected bins
                 gen = torch.Generator().manual_seed(_seed(base_seed, layer_idx, counter["step"]))
                 out, labels, w = fused.attend_sampled(qd, Kc, Vc, n=n_k, budget=float(cfg["budget"]),
                                                       S=int(cfg["S"]), alpha=float(cfg.get("alpha", 0.1)),
@@ -189,7 +190,7 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
                 H_kv = K.shape[1]
                 v_union = unique_counts(info.idx.reshape(H_kv, -1)).float().mean()
                 kv_rows = n_k + float(v_union)
-        elif impl == "sphere_skip_v1":
+        elif impl == "voronoi_skip_v1":
             r0, h0 = state.rebuilds, state.head_steps
             out, info = state.attend(qd, K, V, budget=float(cfg["budget"]),
                                      group=cfg.get("group", "sum_share"))
@@ -197,7 +198,7 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
             stats.head_steps += state.head_steps - h0
             reads = info.unique.float()
             kv_rows = 2 * float(info.kv_union.float().mean()) + info.overhead_rows
-        elif impl == "sphere_skip":                                 # deterministic; skips K and V rows
+        elif impl == "voronoi_skip":                                 # deterministic; skips K and V rows
             out, info = attn(qd, K, V, impl=impl, return_info=True, **call_cfg)
             reads = info.unique.float()
             kv_rows = 2 * float(info.kv_union.float().mean()) + info.overhead_rows

@@ -1,4 +1,4 @@
-"""End-to-end decode speed, fused `sphere_skip` vs exact attention.
+"""End-to-end decode speed, fused `voronoi_skip` vs exact attention.
 
 Qwen3-4B BF16 on the engine. For each context length n: prefill a WikiText-103 prompt in
 chunks (the engine returns logits for every prompt position, so one 32k forward would need
@@ -125,15 +125,15 @@ def profile_step(model, ids, cache, n, impl, cfg) -> dict:
 
 
 CONDITIONS = [("dense", {}),
-              ("sphere_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("voronoi_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False}),
-              ("sphere_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("voronoi_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False})]
 
 
 GRAPH_CONDITIONS = [("dense", {}),
-                    ("sphere", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "check_every": 16}),
-                    ("sphere", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "check_every": 16})]
+                    ("voronoi", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "check_every": 16}),
+                    ("voronoi", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "check_every": 16})]
 
 
 def main() -> None:

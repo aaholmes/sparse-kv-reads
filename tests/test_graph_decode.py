@@ -92,19 +92,19 @@ def _engine_sphere_logits(model, ids):
 def test_sphere_matches_engine_with_same_index(capture):
     model, ids = _setup(2)
     ref = _engine_sphere_logits(model, ids)
-    got, dec = _graph_logits(model, ids, "sphere", capture, **SPHERE)
+    got, dec = _graph_logits(model, ids, "voronoi", capture, **SPHERE)
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
     assert dec.attn[0].head_steps > 0
 
 
 def test_sphere_recenters_between_replays():
     model, ids = _setup(4)
-    _, dec = _graph_logits(model, ids, "sphere", True, **{**SPHERE, "delta": 0.0, "check_every": 1})
+    _, dec = _graph_logits(model, ids, "voronoi", True, **{**SPHERE, "delta": 0.0, "check_every": 1})
     assert sum(i.rebuilds for i in dec.attn) > 0
 
 
 def test_sphere_full_budget_equals_dense():
     model, ids = _setup(3)
     a, _ = _graph_logits(model, ids, "dense", True)
-    b, _ = _graph_logits(model, ids, "sphere", True, **{**SPHERE, "budget": 1.0})
+    b, _ = _graph_logits(model, ids, "voronoi", True, **{**SPHERE, "budget": 1.0})
     torch.testing.assert_close(a, b, rtol=2e-2, atol=2e-2)

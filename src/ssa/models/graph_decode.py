@@ -33,10 +33,12 @@ class GraphDecoder:
         self.pos = torch.zeros(1, dtype=torch.long, device=dev)
         self.n_dev = torch.zeros(1, dtype=torch.int32, device=dev)
         cap = cache.max_seq_len
+        mode = "voronoi" if mode == "sphere" else mode           # old name
+        self.mode = mode
         if mode == "dense":
             self.attn = [DenseAttentionGraph(H=self.H, H_kv=self.H_kv, d=self.d, dtype=dtype, device=dev)
                          for _ in model.layers]
-        elif mode == "sphere":
+        elif mode == "voronoi":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
                                           check_every=check_every) for _ in model.layers]
         else:
@@ -46,7 +48,7 @@ class GraphDecoder:
 
     def prepare(self, n: int) -> None:
         """Build attention state from the first ``n`` cached positions (after prefill)."""
-        if self.mode == "sphere":
+        if self.mode == "voronoi":
             for i, idx in enumerate(self.attn):
                 idx.prepare(self.cache.k[i][0], n, self.H)
 
@@ -98,7 +100,7 @@ class GraphDecoder:
             self.graph.replay()
         else:
             self.logits = self._body()
-        if self.mode == "sphere":
+        if self.mode == "voronoi":
             for i, idx in enumerate(self.attn):
                 idx.after_replay(self.cache.k[i][0])
         self.cache.cur_len = pos + 1

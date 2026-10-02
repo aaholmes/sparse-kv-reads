@@ -1,4 +1,4 @@
-"""Fused Triton bin maintenance and selection for `sphere_skip`.
+"""Fused Triton bin maintenance and selection for `voronoi_skip`.
 
 Replaces ~60 small PyTorch kernels per layer-step (``SphereIndexGPU``) with three Triton
 kernels:

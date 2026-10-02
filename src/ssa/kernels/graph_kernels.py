@@ -7,7 +7,7 @@ selection budget in keys all live in GPU memory; grids are sized for the cache c
 and programs mask out positions beyond ``n``.
 
   - ``DenseAttentionGraph``: exact split-K decode attention over positions ``[0, n)``.
-  - ``SphereIndexGraph``: ``sphere_skip`` with the fused kernels (bin, score, pick, compact,
+  - ``SphereIndexGraph``: ``voronoi_skip`` with the fused kernels (bin, score, pick, compact,
     list attention, merge), all reading lengths from GPU memory. Recentering, which is rare,
     runs between graph replays (``after_replay``), with the drift flags read asynchronously.
 """

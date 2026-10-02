@@ -1,4 +1,4 @@
-"""Offline `sphere_skip` sweep: attention-output error vs K+V reads.
+"""Offline `voronoi_skip` sweep: attention-output error vs K+V reads.
 
 For each captured context, layer, sampled decode step and KV head: center the non-exact
 keys, partition them (flat: ``C`` fixed random directions; tree: ``C1`` coarse directions,

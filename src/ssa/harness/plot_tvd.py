@@ -1,7 +1,7 @@
 """Plot fidelity versus reads: TVD from exact vs percent of K+V rows read.
 
 Reads one or more stamped ``tvd_*.json`` files (from ``ssa.harness.accept_sweep``),
-keeps ``sphere_skip`` and ``sphere_tail`` (skipped regions estimated; its drop control
+keeps ``voronoi_skip`` and ``voronoi_tail`` (skipped regions estimated; its drop control
 is left out) at one region count and ``santa_sys``, and draws each with its
 95% bootstrap CI over chunks. Lower-left is better (fewer reads, closer to exact).
 
@@ -15,7 +15,9 @@ import argparse
 import json
 from pathlib import Path
 
-LABELS = {"sphere_skip": "sphere_skip", "sphere_tail": "sphere_skip + tail estimate",
+from ..attn import canonical
+
+LABELS = {"voronoi_skip": "voronoi_skip", "voronoi_tail": "voronoi_skip + tail estimate",
           "santa_sys": "systematic sampling"}
 
 
@@ -24,12 +26,12 @@ def build_series(paths, regions: int = 256) -> dict[str, dict[str, list[float]]]
     rows: dict[str, list[tuple[float, float, float, float]]] = {k: [] for k in LABELS}
     for p in paths:
         for r in json.loads(Path(p).read_text())["summary"]:
-            impl = r["impl"]
+            impl = canonical(r["impl"])
             if impl not in rows or "tvd_ci" not in r:
                 continue
-            if impl in ("sphere_skip", "sphere_tail") and r["cfg"].get("C") != regions:
+            if impl in ("voronoi_skip", "voronoi_tail") and r["cfg"].get("C") != regions:
                 continue
-            if impl == "sphere_tail" and r["cfg"].get("order") == "drop":       # matched control, not a series
+            if impl == "voronoi_tail" and r["cfg"].get("order") == "drop":       # matched control, not a series
                 continue
             lo, hi = r["tvd_ci"]
             rows[impl].append((round(100 * r["kv_read_fraction"], 1), r["tvd"], lo, hi))
@@ -53,7 +55,7 @@ def plot_series(series, out) -> None:
 
     plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
     fig, ax = plt.subplots(figsize=(4.4, 3.3), dpi=200)
-    style = {"sphere_skip": ("#1f5fbf", "o", "-"), "sphere_tail": ("#2a9d8f", "^", "--"),
+    style = {"voronoi_skip": ("#1f5fbf", "o", "-"), "voronoi_tail": ("#2a9d8f", "^", "--"),
              "santa_sys": ("#c0392b", "s", "none")}
     for impl, s in series.items():
         if not s["x"]:

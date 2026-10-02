@@ -2,7 +2,7 @@
 
 When a large language model (LLM) generates text, each new token reads the stored key and value vectors of every earlier token (the KV cache) from GPU memory. At long context that memory traffic, not arithmetic, limits decoding speed.
 
-After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, and its Bernoulli qKᵀ sampling reduces how many features of each key are read, but it still reads part of every key to compute the sampling probabilities. I asked whether most keys could be skipped entirely. I developed a method, `sphere_skip`, that decides which parts of the cache to read from small summaries of the keys, and wrote GPU kernels that run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
+After reading about the SANTA algorithm ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), I noticed that it avoids most value reads by sampling, and its Bernoulli qKᵀ sampling reduces how many features of each key are read, but it still reads part of every key to compute the sampling probabilities. I asked whether most keys could be skipped entirely. I developed a method, `voronoi_skip`, that decides which parts of the cache to read from small summaries of the keys, and wrote GPU kernels that run it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
 
 - **Speed:** at a 20% budget, decoding at 32,768 tokens is 1.30× faster on Qwen3-4B, at a TVD close to 64-sample sampling's (0.064 compared with 0.057), and 1.81× faster on Qwen3-0.6B. A 5% budget reaches 1.39× and 2.23× (2.40× at 40,448 tokens) at a clear fidelity cost: TVD 0.111 on Qwen3-4B and 0.133 on Qwen3-0.6B at 32,768 tokens, between Qwen3-4B with 8-bit (0.018) and naive 4-bit (0.144) weights, measured at 8,192 tokens.
 - **Fidelity:** at the accuracy of 64-sample SANTA-style sampling, it reads 0.23–0.50× as much of the cache.
@@ -14,7 +14,7 @@ Attention weights each cached value by the softmax of the query's dot product wi
 
 1. **Always read the first token and the 64 most recent tokens.** The first token acts as an attention sink, taking 36–65% of all attention at layers 12–35 of Qwen3-4B.
 2. **Subtract the mean key** of each layer and KV head. This leaves attention unchanged, because softmax ignores a shift common to every score, and it is necessary: before centering, the keys at layer 0 all point almost the same way (average cosine similarity 0.99 with the mean).
-3. **Group keys by direction** using 256 fixed random directions: each key joins the region of its nearest direction. Each region keeps a running sum of its keys' directions, the minimum and maximum key length, and a count.
+3. **Group keys by direction** using 256 fixed random directions: each key joins the region of its nearest direction, so the regions are the Voronoi cells of those directions on the unit sphere (hence the name `voronoi_skip`). Each region keeps a running sum of its keys' directions, the minimum and maximum key length, and a count.
 4. **Score each region without reading its keys**, as its maximum key length times the query's projection on its mean direction (minimum length when the projection is negative): an estimate of the largest attention score inside it.
 5. **Choose once per KV head.** In Qwen3-4B four query heads share each KV head, so they rank regions jointly and read one set of rows.
 6. **Read the top regions' keys and values up to a budget** and compute exact attention over them. The rest is dropped, so the result is slightly biased.
@@ -29,11 +29,11 @@ Fidelity is measured as total variation distance (TVD) between the model's next-
 | method | K+V rows read | TVD from exact |
 |---|---|---|
 | systematic sampling, 64 samples | 50.5% | 0.058 [0.049, 0.065] |
-| `sphere_skip`, 10% budget | 13.1% | 0.063 [0.053, 0.074] |
+| `voronoi_skip`, 10% budget | 13.1% | 0.063 [0.053, 0.074] |
 | systematic sampling, 256 samples | 51.4% | 0.026 [0.023, 0.028] |
-| `sphere_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
+| `voronoi_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
 
-![TVD from the exact model versus key and value rows read, for sphere_skip at budgets of 2–40% and systematic sampling with 64 and 256 samples](docs/tvd_vs_reads_8192.png)
+![TVD from the exact model versus key and value rows read, for voronoi_skip at budgets of 2–40% and systematic sampling with 64 and 256 samples](docs/tvd_vs_reads_8192.png)
 
 *The same setting across budgets of 2–40%; the two systematic-sampling points are 64 and 256 samples.*
 

@@ -1,6 +1,6 @@
 # Earlier work: sampling the cache
 
-Before developing `sphere_skip` (see the [README](../README.md)), I reproduced the sampled-attention estimator of SANTA (*Stochastic Sparse Attention for Memory-Bound Inference*, [arXiv:2605.01910](https://arxiv.org/abs/2605.01910)) in plain PyTorch and tested extensions of it inside Qwen3-4B. The estimator is unbiased: the expected output equals exact attention.
+Before developing `voronoi_skip` (see the [README](../README.md)), I reproduced the sampled-attention estimator of SANTA (*Stochastic Sparse Attention for Memory-Bound Inference*, [arXiv:2605.01910](https://arxiv.org/abs/2605.01910)) in plain PyTorch and tested extensions of it inside Qwen3-4B. The estimator is unbiased: the expected output equals exact attention.
 
 ## Summary
 
@@ -28,8 +28,8 @@ Attention at one decode step is a weighted average of the cached value vectors. 
 | `santa_hybrid` | top-`k_h` tokens exact, remaining mass sampled | yes |
 | `santa_block` | samples contiguous blocks of `B` rows | yes |
 | `skip_k` | reads only the key clusters ranked highest by a cheap estimate | no |
-| `sphere_skip` | exact first and recent tokens; mean-centered keys binned by fixed hypersphere directions; top regions read up to a key budget | no |
-| `sphere_skip_v1` | `sphere_skip` with incremental bins, recentered only when the mean moves more than δ (stateful, engine only) | no |
+| `voronoi_skip` | exact first and recent tokens; mean-centered keys binned by fixed hypersphere directions; top regions read up to a key budget | no |
+| `voronoi_skip_v1` | `voronoi_skip` with incremental bins, recentered only when the mean moves more than δ (stateful, engine only) | no |
 
 The measurement harness accumulates in float64, so low-precision roundoff is never mistaken for bias. Every result file in `src/ssa/results/` records the git commit, GPU, and library versions that produced it.
 
@@ -68,7 +68,7 @@ Sampling saves value reads, but computing the weights `A` still reads every key.
 
 A diagnostic on real Qwen3-4B keys (`ssa.harness.cluster_diag`) found two things. Estimating a cluster's total attention weight from its mean and covariance fails, because the weight inside each cluster sits on a single token (within-cluster participation ratio ≈ 1). A *magnitude* estimate ranks better. It clusters keys by direction and keeps each key's true length. With 8-key clusters at the two deepest layers sampled (24 and 35), it captures 99% of the attention weight while reading 0.24–0.32% of keys, compared with a best possible 0.19–0.26%; the Gaussian estimate needs 22–35%. With 16-key clusters it does much worse (8–12% of keys). Setting: one KV head, 1024-token prompt, 32 decode steps, layers 0, 12, 24, 35.
 
-End to end, the ranking was not enough. With `skip_k`, which reads only the top-ranked clusters and drops the rest, perplexity is +1.4% at 60% of keys read and +92% at 17% (640-token context, 2 chunks, 1 seed). With `santa_sys` at S=256, 9.2% of rows are read and perplexity is within 1% of dense. Dropping clusters discards the long tail of small attention weights, and that tail matters in aggregate; sampling covers it cheaply. Both obvious variants were tested later: selecting to a fixed key budget, with better regions and ranking, became `sphere_skip` (see the [README](../README.md)); sampling the unselected regions rather than dropping them lost.
+End to end, the ranking was not enough. With `skip_k`, which reads only the top-ranked clusters and drops the rest, perplexity is +1.4% at 60% of keys read and +92% at 17% (640-token context, 2 chunks, 1 seed). With `santa_sys` at S=256, 9.2% of rows are read and perplexity is within 1% of dense. Dropping clusters discards the long tail of small attention weights, and that tail matters in aggregate; sampling covers it cheaply. Both obvious variants were tested later: selecting to a fixed key budget, with better regions and ranking, became `voronoi_skip` (see the [README](../README.md)); sampling the unselected regions rather than dropping them lost.
 
 **The magnitude estimate and its bounds.** Write each key as length times direction, `k_j = |k_j| k̂_j`, so the exact term is `e^{q·k_j} = e^{|k_j|(q·k̂_j)}`. The estimate keeps each key's true length but replaces its direction with the cluster's mean direction `ĉ_b`:
 

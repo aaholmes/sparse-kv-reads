@@ -31,7 +31,7 @@ def _setup():
 def test_full_budget_matches_dense():
     model, ids = _setup()
     ref = _decode(model, ids)
-    install(model, "sphere_tail", budget=1.0, order=1, **KW)
+    install(model, "voronoi_tail", budget=1.0, order=1, **KW)
     got = _decode(model, ids)
     uninstall(model)
     torch.testing.assert_close(got, ref, rtol=1e-3, atol=1e-3)
@@ -39,10 +39,10 @@ def test_full_budget_matches_dense():
 
 def test_drop_mode_reads_fewer_rows_and_counts_only_the_existing_summaries():
     model, ids = _setup()
-    drop = install(model, "sphere_tail", budget=0.2, order="drop", **KW)
+    drop = install(model, "voronoi_tail", budget=0.2, order="drop", **KW)
     a = _decode(model, ids)
     uninstall(model)
-    est = install(model, "sphere_tail", budget=0.2, order=1, **KW)
+    est = install(model, "voronoi_tail", budget=0.2, order=1, **KW)
     b = _decode(model, ids)
     uninstall(model)
     assert torch.isfinite(a).all() and torch.isfinite(b).all()
@@ -57,7 +57,7 @@ def test_drop_layers_fall_back_to_dropping_on_those_layers_only():
     for name, extra in (("est", {}), ("drop", {"order": "drop"}), ("mixed", {"drop_layers": [0]}),
                         ("all_dropped", {"drop_layers": [0, 1]})):
         cfg = {"order": 1, **extra}
-        install(model, "sphere_tail", budget=0.2, **cfg, **KW)
+        install(model, "voronoi_tail", budget=0.2, **cfg, **KW)
         runs[name] = _decode(model, ids)
         uninstall(model)
     torch.testing.assert_close(runs["all_dropped"], runs["drop"], rtol=1e-5, atol=1e-5)
