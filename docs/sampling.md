@@ -45,7 +45,7 @@ For the hybrid, the budget on the x-axis counts both the exact head and the samp
 
 ### Real-model perplexity
 
-The estimators replace attention inside Qwen3-4B (in BF16, the 16-bit brain floating-point format) during decode, while the prompt is still processed exactly. The model runs on a from-scratch Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)); a small hook in that engine lets this package swap the decode attention op. `ssa.harness.ppl_sweep` scores teacher-forced perplexity as a function of the fraction of value rows read.
+The estimators replace attention inside Qwen3-4B (in bf16) during decode, while the prompt is still processed exactly. The model runs on a from-scratch Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)); a small hook in that engine lets this package swap the decode attention op. `ssa.harness.ppl_sweep` scores teacher-forced perplexity as a function of the fraction of value rows read.
 
 ![Perplexity vs value-read fraction at 4096 context](ppl_frontier_4096.png)
 
@@ -60,13 +60,13 @@ The estimators replace attention inside Qwen3-4B (in BF16, the 16-bit brain floa
 
 ![Variance vs block size](variance_vs_block.png)
 
-Blocks would only pay off if attention mass clustered in contiguous positions, or if contiguous reads were enough cheaper per byte on the hardware; this byte-count harness measures neither. `ssa.harness.plot_blocks` also tests one proposed fix: reorder the cache so each block holds keys with similar content (k-means on the keys). Block sampling stays unbiased under any reordering. The figure above predates that option, so it shows the native order only.
+Blocks would only pay off if attention mass clustered in contiguous positions, or if contiguous reads were enough cheaper per byte on the hardware; this byte-count harness measures neither. `ssa.harness.plot_blocks` also tests one proposed fix: reorder the cache so each block holds keys with similar content (k-means on the keys). Block sampling stays unbiased under any reordering. The figure shows the native order only; the reordered layout has not been measured.
 
 ### Skipping key reads
 
 Sampling saves value reads, but computing the weights `A` still reads every key. I tested whether cheap per-cluster summaries could decide which key clusters to read at all.
 
-A diagnostic on real Qwen3-4B keys (`ssa.harness.cluster_diag`) found two things. Estimating a cluster's total attention weight from its mean and covariance fails, because the weight inside each cluster sits on a single token (within-cluster participation ratio ≈ 1). A *magnitude* estimate ranks better. It clusters keys by direction and keeps each key's true length. With 8-key clusters at the two deepest layers sampled (24 and 35), it captures 99% of the attention weight while reading 0.24–0.32% of keys, compared with a best possible 0.19–0.26%; the Gaussian estimate needs 22–35%. With 16-key clusters it does much worse (8–12% of keys). Setting: one KV head, 1024-token prompt, 32 decode steps, layers 0, 12, 24, 35.
+A diagnostic on real Qwen3-4B keys (`ssa.harness.cluster_diag`) found two things. Estimating a cluster's total attention weight from its mean and covariance fails, because the weight inside each cluster sits on a single token (within-cluster participation ratio ≈ 1). A *magnitude* estimate ranks better. It clusters keys by direction and keeps each key's true length. With 8-key clusters at the two deepest layers sampled (24 and 35), it captures 99% of the attention weight while reading 0.24–0.32% of keys, compared with a best possible 0.19–0.26%; the Gaussian estimate needs 22–35%. With 16-key clusters it does much worse (8–12% of keys). Setting: one KV head (a set of keys and values shared by several query heads), 1024-token prompt, 32 decode steps, layers 0, 12, 24, 35.
 
 End to end, the ranking was not enough. With `skip_k`, which reads only the top-ranked clusters and drops the rest, perplexity is +1.4% at 60% of keys read and +92% at 17% (640-token context, 2 chunks, 1 seed). With `santa_sys` at S=256, 9.2% of rows are read and perplexity is within 1% of dense. Dropping clusters discards the long tail of small attention weights, and that tail matters in aggregate; sampling covers it cheaply. Both obvious variants were tested later: selecting to a fixed key budget, with better regions and ranking, became `voronoi_skip` (see the [README](../README.md)); sampling the unselected regions rather than dropping them lost.
 

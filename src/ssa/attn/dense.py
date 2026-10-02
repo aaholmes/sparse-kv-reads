@@ -24,7 +24,7 @@ def dense(q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, **cfg) -> torch.Ten
 def topk(q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, *, k: int, **cfg) -> torch.Tensor:
     """Keep the ``k`` highest-weight keys per head, renormalise, exact sum.
 
-    Biased baseline — its expectation is **not** ``dense`` (no unbiasedness gate).
+    Biased baseline — its expectation is **not** ``dense`` (so it is not tested for unbiasedness).
     With ``k >= n_k`` it reduces to ``dense``.
     """
     H = q.shape[0]

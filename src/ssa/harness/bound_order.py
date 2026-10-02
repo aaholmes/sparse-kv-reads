@@ -8,7 +8,7 @@ and min key length ``M_b``, ``μ_b``. For a query ``q`` the score of any key in 
     q·k_j ≤ U_b = M_b·x_b if x_b ≥ 0 else μ_b·x_b,     x_b = q·ĉ_b + ‖q‖ρ_b.
 
 Visit clusters in decreasing order of a ranking key and track cumulative softmax
-attention mass against the fraction of clusters visited. Rankings: ``bound`` (U_b),
+attention mass versus the fraction of clusters visited. Rankings: ``bound`` (U_b),
 ``meandir_maxmag`` (M_b·q·ĉ_b, no radius: an estimate, not a bound), ``oracle``
 (true cluster mass, the best possible order), ``random``.
 

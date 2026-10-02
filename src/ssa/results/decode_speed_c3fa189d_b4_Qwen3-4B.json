@@ -1,0 +1,116 @@
+{
+ "git_sha": "c3fa189d90520e462c5bccbfad6a4947b742f7e7",
+ "torch_version": "2.12.1+cu130",
+ "cuda_version": "13.0",
+ "python_version": "3.12.13",
+ "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 5060 Ti",
+  "capability": [
+   12,
+   0
+  ],
+  "driver": "13.0"
+ },
+ "kind": "decode_speed",
+ "model": "Qwen/Qwen3-4B",
+ "batch": 4,
+ "steps": 64,
+ "warmup": 8,
+ "repeats": 3,
+ "prefill_chunk": 512,
+ "rows": [
+  {
+   "ms_per_token_median": 37.21537780761719,
+   "ms_min": 37.21491241455078,
+   "ms_max": 37.2160758972168,
+   "ms_all": [
+    37.216075015749084,
+    37.215376454696525,
+    37.21491416945355
+   ],
+   "gpu_ms": 34.48590400000002,
+   "attention_kernels_ms": 11.826976999999994,
+   "n": 8192,
+   "impl": "dense",
+   "cfg": {},
+   "batch": 4
+  },
+  {
+   "ms_per_token_median": 34.822235107421875,
+   "ms_min": 34.80267333984375,
+   "ms_max": 35.38590621948242,
+   "ms_all": [
+    35.385906012379564,
+    34.82223606260959,
+    34.80267209306476
+   ],
+   "tvd_vs_engine_dense": 0.01037286315113306,
+   "n": 8192,
+   "impl": "graph_flashinfer",
+   "cfg": {},
+   "batch": 4,
+   "tokens_per_s": 114.86913426609586
+  },
+  {
+   "ms_per_token_median": 35.16739273071289,
+   "ms_min": 35.155662536621094,
+   "ms_max": 35.19051742553711,
+   "ms_all": [
+    35.19051635885262,
+    35.15566190617392,
+    35.1673916738946
+   ],
+   "tvd_vs_engine_dense": 0.01118643581867218,
+   "n": 8192,
+   "impl": "graph_dense",
+   "cfg": {},
+   "batch": 4,
+   "tokens_per_s": 113.74172747548222
+  },
+  {
+   "ms_per_token_median": 28.361940383911133,
+   "ms_min": 28.36069107055664,
+   "ms_max": 28.36488914489746,
+   "ms_all": [
+    28.361941047478467,
+    28.364889170916285,
+    28.36069128170493
+   ],
+   "tvd_vs_engine_dense": 0.04530259221792221,
+   "n": 8192,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16
+   },
+   "batch": 4,
+   "tokens_per_s": 141.03407403920355
+  },
+  {
+   "ms_per_token_median": 26.399559020996094,
+   "ms_min": 26.39400291442871,
+   "ms_max": 26.417125701904297,
+   "ms_all": [
+    26.41712557669962,
+    26.394002543383976,
+    26.399558315461036
+   ],
+   "tvd_vs_engine_dense": 0.08558960258960724,
+   "n": 8192,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16
+   },
+   "batch": 4,
+   "tokens_per_s": 151.5176824286618
+  }
+ ]
+}

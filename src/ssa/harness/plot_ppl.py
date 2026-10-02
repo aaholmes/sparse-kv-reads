@@ -2,7 +2,7 @@
 
 Reads one or more stamped ``phaseC_ppl_*.json`` files (from ``ssa.harness.ppl_sweep``)
 and overlays them, so a focused run (e.g. the cheap-end hybrids + top-k) can be
-drawn against an earlier sweep's ``santa_sys`` curve without re-running it.
+drawn alongside an earlier sweep's ``santa_sys`` curve without re-running it.
 
 Lower-left is better (fewer value rows read, smaller quality hit). ``santa_sys``
 and ``topk`` are swept curves; ``santa_hybrid`` is grouped by head size ``k_h``.

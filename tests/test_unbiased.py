@@ -2,7 +2,7 @@
 
 We assert the Monte-Carlo mean lands within a few standard errors of the float64
 dense reference, coordinate-wise. topk is the biased baseline and is explicitly
-NOT subject to this gate.
+NOT subject to this test.
 """
 
 from __future__ import annotations

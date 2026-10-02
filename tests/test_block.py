@@ -1,4 +1,4 @@
-"""Contiguous-block sampling: aggregation, limits, and the unbiasedness gate."""
+"""Contiguous-block sampling: aggregation, limits, and the unbiasedness test."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def test_full_block_equals_dense_and_deterministic():
     torch.testing.assert_close(outs[0], outs[1], rtol=0, atol=0)  # zero variance
 
 
-# --- unbiasedness GATE -------------------------------------------------------
+# --- unbiasedness test -------------------------------------------------------
 
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("B", [2, 4, 8])

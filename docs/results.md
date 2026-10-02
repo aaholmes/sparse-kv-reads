@@ -1,6 +1,6 @@
 # Detailed results for `voronoi_skip`
 
-Supporting detail for the [README](../README.md). Unless stated otherwise: Qwen3-4B in BF16, WikiText-103, 8 text chunks per setting (2040 scored decode steps), fidelity as total variation distance (TVD) from the exact model's next-token distribution, reads as key and value (K+V) rows including region summaries, and [95% bootstrap CI over chunks].
+Supporting detail for the [README](../README.md). Unless stated otherwise, results are for Qwen3-4B in bf16 on WikiText-103, with 8 text chunks per setting (2,040 scored decode steps). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's; reads are key and value (K+V) rows, including region summaries; brackets are 95% bootstrap confidence intervals over chunks. Timings are on one RTX 5060 Ti GPU (16 GB, 448 GB/s).
 
 ## Fidelity compared with systematic sampling
 
@@ -33,9 +33,9 @@ Supporting detail for the [README](../README.md). Unless stated otherwise: Qwen3
 
 ## Comparison with weight quantization
 
-As reference points for what a given TVD means, Qwen3-4B with weight-only round-to-nearest quantization (embeddings and output layer kept in BF16), 8192 tokens:
+As reference points for what a given TVD means, Qwen3-4B with weight-only round-to-nearest quantization (embeddings and output layer kept in bf16), 8192 tokens:
 
-| model | TVD from BF16 | top-1 agreement |
+| model | TVD from bf16 | top-1 agreement |
 |---|---|---|
 | 8-bit weights | 0.018 [0.015, 0.019] | 97.9% |
 | 4-bit weights, groups of 128 | 0.144 [0.125, 0.159] | 84.0% |
@@ -53,7 +53,7 @@ Why: split attention into the top set (weight f, mean value μ_H) and the rest (
 
 ## Kernels and timing
 
-Three Triton kernels (Triton is a Python-embedded language for writing GPU kernels) maintain and choose regions: they assign the key leaving the recent window, score the regions, and select up to the budget without sorting. Two more compact the selected positions into a list and run split attention over it (flash-decoding). One layer, Qwen3-4B head layout, BF16, RTX 5060 Ti; median of 100 calls with the L2 cache flushed, both sides in CUDA graphs; exact attention by PyTorch's scaled dot-product attention (SDPA) and by FlashInfer (`kernel_bench --step --flashinfer`):
+Three Triton kernels maintain and choose regions: they assign the key leaving the recent window, score the regions, and select up to the budget without sorting. Two more compact the selected positions into a list and run split attention over it (flash-decoding). One layer, Qwen3-4B head layout, bf16, RTX 5060 Ti; median of 100 calls with the L2 cache flushed, both sides captured in CUDA graphs (a recorded sequence of GPU operations replayed with one launch); exact attention by PyTorch's scaled dot-product attention (SDPA) and by FlashInfer (`kernel_bench --step --flashinfer`):
 
 | context | SDPA | FlashInfer | whole step, 20% of rows | whole step, 5% of rows |
 |---|---|---|---|---|
@@ -72,12 +72,39 @@ The kernels run inside the inference engine, one region index per layer, reading
 
 | model | context | exact, engine's kernel | exact, FlashInfer | 20% budget | 5% budget |
 |---|---|---|---|---|---|
-| Qwen3-0.6B | 16384 | 9.6 ms | 9.8 ms | 6.7 ms (1.43×) | 6.1 ms (1.57×) |
-| Qwen3-0.6B | 32768 | 14.0 ms | 14.5 ms | 7.8 ms (1.78×) | 6.3 ms (2.22×) |
+| Qwen3-0.6B | 16384 | 9.4 ms | 9.8 ms | 6.7 ms (1.40×) | 5.9 ms (1.58×) |
+| Qwen3-0.6B | 32768 | 14.0 ms | 14.2 ms | 7.7 ms (1.81×) | 6.3 ms (2.22×) |
 | Qwen3-0.6B | 40448 | 16.0 ms | 16.6 ms | 8.3 ms (1.93×) | 6.5 ms (2.46×) |
 | Qwen3-4B | 16384 | 29.1 ms | 29.4 ms | 25.5 ms (1.14×) | 24.6 ms (1.18×) |
 | Qwen3-4B | 32768 | 34.8 ms | 35.1 ms | 26.8 ms (1.30×) | 25.0 ms (1.39×) |
 
-Speedups are relative to the faster exact kernel, the engine's own. FlashInfer's paged decode (`ssa.kernels.flashinfer_graph`) reads the engine's contiguous cache in place, viewed as 16-token pages; per layer it matches FlashInfer's single-sequence decode, but being told the new length on the CPU before each token makes it 0.25–0.63 ms per token slower end to end (inferred from the per-layer timings; not profiled).
+Rows at 16,384 and 32,768 tokens for Qwen3-0.6B come from the batched sweep's batch-1 run (`decode_speed_af689118_b1_Qwen3-0.6B.json`), the others from `decode_speed_7a026cd8_*_flashinfer.json`. Timings repeat closely: running a setting again in an independent run changes its median time by up to 2.5% for Qwen3-0.6B, whose 6–14 ms steps are sensitive to small delays on the CPU that launches them, and by under 0.1% for Qwen3-4B; speedups change by up to 0.03×. Within a run, the 3 repeats of a setting span a median 2.3% (at most 7.5%) for Qwen3-0.6B and 0.1% (at most 2.0%) for Qwen3-4B.
 
-Reading the weights costs a fixed amount per token (8 GB for Qwen3-4B, ~22 ms; 1.2 GB for Qwen3-0.6B), and the cache's size reaches the weights' at ~54k tokens for Qwen3-4B and ~10k for Qwen3-0.6B, or proportionally sooner with batching. The method pays most when the weights are small relative to the cache: long context, batched serving, or smaller models. Graph-captured exact decoding differs from the engine's standard attention by TVD ~0.01 through BF16 rounding. During this work the engine's own exact-attention decode was made up to 2.6× faster by sharing KV heads across query heads instead of copying the cache.
+Speedups are relative to the faster exact kernel, the engine's own. FlashInfer's paged decode (`ssa.kernels.flashinfer_graph`) reads the engine's contiguous cache in place, viewed as 16-token pages; per layer it matches FlashInfer's single-sequence decode, but being told the new length by the CPU before each token makes it 0.2–0.6 ms per token slower end to end (inferred from the per-layer timings; not profiled).
+
+Reading the weights costs a fixed amount per token (8 GB for Qwen3-4B, ~22 ms; 1.2 GB for Qwen3-0.6B), and the cache's size reaches the weights' at ~54k tokens for Qwen3-4B and ~10k for Qwen3-0.6B, or proportionally sooner with batching. The method pays most when the weights are small relative to the cache: long context, batched serving, or smaller models. Graph-captured exact decoding differs from the engine's standard attention by TVD ~0.01 through bf16 rounding. During this work the engine's own exact-attention decode was made up to 2.6× faster by sharing KV heads across query heads instead of copying the cache.
+
+## Batched decoding
+
+`GraphDecoder` (`src/ssa/models/graph_decode.py`), which runs the engine's per-token forward pass with the engine's own layers, weights and cache as one CUDA graph and lets the attention kernel be swapped, decodes B equal-length sequences together (B different WikiText chunks). Every attention mode treats the batch as B × 8 independent KV heads, viewing the engine's cache `[B, H_kv, L, d]` as `[B·H_kv, L, d]` without copying; tests check that a batch of 3 matches 3 separate runs. Speedups are over the faster of the two exact kernels (the engine's own and FlashInfer's paged decode) at the same batch size; bf16, CUDA graphs, median ms per decode step over 3 repeats of 64 steps (`decode_speed --graph --flashinfer --batch B`; `src/ssa/results/decode_speed_af689118_b1_Qwen3-0.6B.json` and `decode_speed_c3fa189d_b*_Qwen3-*.json`). The batch sizes and lengths are limited by the 16 GB card.
+
+| model | batch | context | exact, ms per step | exact, tokens/s | 20% budget | 5% budget |
+|---|---|---|---|---|---|---|
+| Qwen3-0.6B | 1 | 8,192 | 7.2 | 139 | 1.16× | 1.25× |
+| Qwen3-0.6B | 1 | 16,384 | 9.4 | 106 | 1.40× | 1.58× |
+| Qwen3-0.6B | 1 | 32,768 | 14.0 | 71 | 1.81× | 2.22× |
+| Qwen3-0.6B | 2 | 8,192 | 10.0 | 200 | 1.35× | 1.42× |
+| Qwen3-0.6B | 2 | 16,384 | 14.2 | 141 | 1.63× | 1.93× |
+| Qwen3-0.6B | 2 | 32,768 | 23.1 | 87 | 2.15× | 2.90× |
+| Qwen3-0.6B | 4 | 8,192 | 14.4 | 278 | 1.58× | 1.94× |
+| Qwen3-0.6B | 4 | 16,384 | 23.1 | 173 | 2.02× | 2.79× |
+| Qwen3-0.6B | 8 | 8,192 | 23.4 | 342 | 1.91× | 2.55× |
+| Qwen3-4B | 1 | 8,192 | 26.2 | 38 | 1.05× | 1.07× |
+| Qwen3-4B | 1 | 16,384 | 29.1 | 34 | 1.14× | 1.18× |
+| Qwen3-4B | 2 | 8,192 | 29.1 | 69 | 1.11× | 1.15× |
+| Qwen3-4B | 2 | 16,384 | 34.4 | 58 | 1.26× | 1.34× |
+| Qwen3-4B | 4 | 8,192 | 34.8 | 115 | 1.23× | 1.32× |
+
+- **The speedup grows with batch size and tracks the batch's total cached tokens:** for Qwen3-0.6B with 32k cached tokens in total, 1.81× (1 × 32k), 1.63× (2 × 16k), 1.58× (4 × 8k); with 64k, 2.15×, 2.02×, 1.91×. Weights are read once per step for the whole batch, while every sequence's cache is read separately, so the cache's share of each step grows with the batch.
+- **Fidelity is unchanged by batching:** TVD from the engine's exact decoding at a 20% budget, on one chunk per setting, is 0.054–0.076 for Qwen3-0.6B and 0.042–0.049 for Qwen3-4B, the same range as at batch 1.
+- Exact throughput grows less than proportionally with batch size at long context (Qwen3-0.6B at 32k: 71 → 87 tokens/s from batch 1 to 2), because the cache reads grow with the batch.

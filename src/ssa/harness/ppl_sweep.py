@@ -118,7 +118,7 @@ SPHERE_V1_CONDITIONS = (
        for dl in (0.03, float("inf")) for b in (0.1, 0.2)]
 )
 
-# Fused Triton kernels in the engine: TVD check against the simulator results.
+# Fused Triton kernels in the engine: TVD compared with the simulator results.
 SPHERE_FUSED_CONDITIONS = (
     [("dense", {})]
     + [("voronoi_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",

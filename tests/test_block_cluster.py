@@ -1,4 +1,4 @@
-"""Content-clustered block layout: permutation validity + the unbiasedness gate.
+"""Content-clustered block layout: permutation validity and the unbiasedness test.
 
 Reordering the key axis so similar keys sit contiguously is a pure efficiency move:
 ``santa_block`` is unbiased for *any* partition, so clustering can
@@ -39,7 +39,7 @@ def test_permutation_leaves_dense_invariant():
     torch.testing.assert_close(dense(q, K, V), dense(q, K_c, V_c), rtol=1e-12, atol=1e-12)
 
 
-# --- unbiasedness GATE (clustered layout) ------------------------------------
+# --- unbiasedness test (clustered layout) ------------------------------------
 
 @pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("B", [2, 8])

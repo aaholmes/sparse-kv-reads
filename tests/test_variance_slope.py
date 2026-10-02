@@ -1,7 +1,7 @@
 """Variance-decay test: estimator variance-trace falls as ~1/S.
 
 The paper reports log-log slopes near -1 (-1.1 iid / -1.27 strat / -1.29 sys). On
-tiny float64 tensors we gate on the qualitative result: each slope is clearly ~1/S
+tiny float64 tensors we test only the qualitative result: each slope is clearly ~1/S
 (within a band around -1), and stratified/systematic are no worse than iid.
 If this fails, stop — nothing downstream is valid.
 """
