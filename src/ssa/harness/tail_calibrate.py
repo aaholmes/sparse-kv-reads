@@ -41,8 +41,10 @@ def components(q, K, V, n, *, budget, C=256, window=64, check=False) -> dict:
     muH = torch.einsum("hn,hnd->hd", torch.softmax(sh, -1), Vx)
     logz, vbar, _ = tail_log_estimates(idx, q, w, order=1)
     muT = torch.einsum("hc,hcd->hd", torch.softmax(logz, -1), vbar)
+    cnt = torch.where(torch.isfinite(logz), idx.count.repeat_interleave(G, 0), torch.zeros_like(logz))
+    muTflat = torch.einsum("hc,hcd->hd", cnt, vbar) / cnt.sum(1, keepdim=True).clamp_min(1)   # plain mean of dropped values
     out = {"logZH": torch.logsumexp(sh, -1), "logZT": torch.logsumexp(logz, -1), "muH": muH, "muT": muT,
-           "exact": exact}
+           "muTflat": muTflat, "exact": exact}
     if check:
         ref = attend_with_tail(idx, q, K, V, labels, w, order=1)
         torch.testing.assert_close(mix(out, torch.tensor(1.0, dtype=q.dtype)), ref)
@@ -130,11 +132,46 @@ def analyze() -> None:
     print(f"wrote {out}")
 
 
+def variants() -> None:
+    """Error of each way of using the tail estimate, divided by dropping's (``κ = 1``)."""
+    import json
+    from .stamp import stamp
+    data = torch.load(COMPONENTS, weights_only=False)
+    recs = data["records"]
+    n_ctx = 1 + max(r["ctx"] for r in recs)
+    names = ("full", "denominator_only", "denominator_plain_tail_mean")
+    rows = []
+    for L in sorted({r["layer"] for r in recs}):
+        for b in BUDGETS:
+            err = {k: torch.zeros(n_ctx, dtype=torch.float64) for k in ("drop",) + names}
+            for r in recs:
+                if r["layer"] != L or r["budget"] != b:
+                    continue
+                a = torch.sigmoid(r["logZT"] - r["logZH"]).unsqueeze(-1)            # estimated tail share
+                outs = {"drop": r["muH"], "full": (1 - a) * r["muH"] + a * r["muT"],
+                        "denominator_only": (1 - a) * r["muH"],
+                        "denominator_plain_tail_mean": (1 - a) * r["muH"] + a * r["muTflat"]}
+                for k, o in outs.items():
+                    err[k][r["ctx"]] += ((o - r["exact"]) ** 2).sum()
+            row = {"layer": L, "budget": b}
+            for k in names:
+                row[k] = float(err[k].sum() / err["drop"].sum())
+                row[k + "_ci"] = _boot(err[k], err["drop"])
+            rows.append(row)
+    payload = stamp({"kind": "tail_variants", "source": data["meta"], "summary": rows})
+    out = Path("src/ssa/results") / f"tail_variants_{payload['git_sha'][:8]}.json"
+    out.write_text(json.dumps(payload, indent=1))
+    for r in rows:
+        print(f"L{r['layer']:>2} b={r['budget']:.2f}  " + "  ".join(
+            f"{k} {r[k]:.2f} [{r[k + '_ci'][0]:.2f}, {r[k + '_ci'][1]:.2f}]" for k in names))
+    print(f"wrote {out}")
+
+
 def main() -> None:
     import argparse
     import glob
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=("collect", "analyze"))
+    p.add_argument("mode", choices=("collect", "analyze", "variants"))
     p.add_argument("--captures", default="src/ssa/results/multictx/*.pt")
     p.add_argument("--step-stride", type=int, default=16)
     args = p.parse_args()
@@ -143,8 +180,10 @@ def main() -> None:
         if not files:
             raise SystemExit(f"no captures match {args.captures}")
         collect(files, args.step_stride)
-    else:
+    elif args.mode == "analyze":
         analyze()
+    else:
+        variants()
 
 
 if __name__ == "__main__":

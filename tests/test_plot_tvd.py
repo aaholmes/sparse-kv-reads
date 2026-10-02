@@ -55,3 +55,18 @@ def test_plot_writes_png(tmp_path):
     out = tmp_path / "tvd.png"
     plot_series(build_series([a], regions=256), out)
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_tail_estimate_is_its_own_series_and_the_drop_control_is_left_out(tmp_path):
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps(_payload([
+        _row("sphere_tail", {"budget": 0.1, "C": 256, "order": 1}, 0.147, 0.045, 0.038, 0.052),
+        _row("sphere_tail", {"budget": 0.1, "C": 256, "order": "drop"}, 0.131, 0.063, 0.053, 0.074),
+        _row("sphere_skip", {"budget": 0.1, "C": 256}, 0.13, 0.063, 0.053, 0.074),
+    ])))
+    s = build_series([a], regions=256)
+    assert s["sphere_tail"]["x"] == [14.7] and s["sphere_tail"]["y"] == [0.045]
+    assert s["sphere_skip"]["x"] == [13.0]
+    out = tmp_path / "tvd.png"
+    plot_series(s, out)
+    assert out.exists()

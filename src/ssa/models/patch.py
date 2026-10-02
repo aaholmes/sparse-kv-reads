@@ -116,8 +116,37 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         track = bool(cfg.get("track_reads", True))
         fused_prev = {"rebuilds": 0, "head_steps": 0}
 
+    tail = None
+    if impl == "sphere_tail":                          # estimated dropped bins, pure PyTorch, one index per layer
+        from ..attn.tail_estimate import SphereIndexTail
+        tail = SphereIndexTail(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
+                               delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
+                               check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)))
+
     def op(q, full_k, full_v, *, scale, layer_idx):
         qd = q[0, :, 0, :]                          # [H, d]
+        if tail is not None:                        # order=1: estimate dropped bins; order="drop" (or a layer
+                                                    # in drop_layers): drop them
+            from ..attn.labeled import label_weighted_attention
+            from ..attn.tail_estimate import attend_with_tail
+            Kc, Vc = full_k[0], full_v[0]
+            n_k = Kc.shape[1]
+            tail.observe(Kc, Vc, n_k)
+            labels, w = tail.labels_and_weights(qd, n=n_k, budget=float(cfg["budget"]),
+                                                group=cfg.get("group", "sum_share"))
+            order = "drop" if layer_idx in cfg.get("drop_layers", ()) else cfg.get("order", 1)
+            d = qd.shape[1]
+            if order == "drop":
+                out = label_weighted_attention(qd, Kc, Vc, labels, w)
+                extra = 0.0
+            else:
+                out = attend_with_tail(tail, qd, Kc, Vc, labels, w, order=int(order)).to(qd.dtype)
+                extra = tail.C * (1 + 3 / d)                 # value sums + three scalars per bin
+            rows = (torch.gather(w, 1, labels.long()) > 0).sum(1).float()         # [H_kv]
+            stats.record(n_k=n_k, reads_per_head=rows,
+                         kv_rows=float(2 * rows.mean()) + tail.C * (1 + 2 / d) + extra)
+            counter["step"] += 1
+            return out.view(1, -1, 1, d)
         if fused is not None:                       # reads the cache in place: [H_kv, n, d] views, no copy
             Kc, Vc = full_k[0], full_v[0]
             n_k = Kc.shape[1]

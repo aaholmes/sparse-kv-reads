@@ -1,0 +1,363 @@
+{
+ "git_sha": "cbbc965939ba762037f850fd276e13d20a260d2c",
+ "torch_version": "2.12.1+cu130",
+ "cuda_version": "13.0",
+ "python_version": "3.12.13",
+ "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 5060 Ti",
+  "capability": [
+   12,
+   0
+  ],
+  "driver": "13.0"
+ },
+ "kind": "tail_variants",
+ "source": {
+  "git_sha": "cbbc965939ba762037f850fd276e13d20a260d2c",
+  "torch_version": "2.12.1+cu130",
+  "cuda_version": "13.0",
+  "python_version": "3.12.13",
+  "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+  "gpu": {
+   "name": "NVIDIA GeForce RTX 5060 Ti",
+   "capability": [
+    12,
+    0
+   ],
+   "driver": "13.0"
+  },
+  "kind": "tail_components",
+  "captures": [
+   "code00.pt",
+   "code01.pt",
+   "code02.pt",
+   "code03.pt",
+   "code04.pt",
+   "code05.pt",
+   "code06.pt",
+   "code07.pt",
+   "wikitext00.pt",
+   "wikitext01.pt",
+   "wikitext02.pt",
+   "wikitext03.pt",
+   "wikitext04.pt",
+   "wikitext05.pt",
+   "wikitext06.pt",
+   "wikitext07.pt"
+  ],
+  "step_stride": 16,
+  "budgets": [
+   0.05,
+   0.1,
+   0.2,
+   0.4
+  ]
+ },
+ "summary": [
+  {
+   "layer": 0,
+   "budget": 0.05,
+   "full": 0.46160618757731425,
+   "full_ci": [
+    0.41790814611598043,
+    0.5162258843999589
+   ],
+   "denominator_only": 1.3599024376825917,
+   "denominator_only_ci": [
+    1.2311683897199295,
+    1.5343284678355102
+   ],
+   "denominator_plain_tail_mean": 0.816506799621438,
+   "denominator_plain_tail_mean_ci": [
+    0.7247255067530911,
+    0.9364759196858464
+   ]
+  },
+  {
+   "layer": 0,
+   "budget": 0.1,
+   "full": 0.46160533307614204,
+   "full_ci": [
+    0.4191537743024705,
+    0.5119615272307595
+   ],
+   "denominator_only": 1.2944665146543934,
+   "denominator_only_ci": [
+    1.1753351876294347,
+    1.4422313193336223
+   ],
+   "denominator_plain_tail_mean": 0.7557956944113304,
+   "denominator_plain_tail_mean_ci": [
+    0.674964698780608,
+    0.8529476652744209
+   ]
+  },
+  {
+   "layer": 0,
+   "budget": 0.2,
+   "full": 0.45725791644022457,
+   "full_ci": [
+    0.42143086741444413,
+    0.49586404901993836
+   ],
+   "denominator_only": 1.2157849550918447,
+   "denominator_only_ci": [
+    1.1159735621611582,
+    1.3148703925654666
+   ],
+   "denominator_plain_tail_mean": 0.7323601279151907,
+   "denominator_plain_tail_mean_ci": [
+    0.6558048703471828,
+    0.8142041173294129
+   ]
+  },
+  {
+   "layer": 0,
+   "budget": 0.4,
+   "full": 0.47600130690345477,
+   "full_ci": [
+    0.44534954722456643,
+    0.5132247192511609
+   ],
+   "denominator_only": 0.9780214511100502,
+   "denominator_only_ci": [
+    0.9175202208631016,
+    1.0626538108954415
+   ],
+   "denominator_plain_tail_mean": 0.5345528915841968,
+   "denominator_plain_tail_mean_ci": [
+    0.48227495325697234,
+    0.6004472855448799
+   ]
+  },
+  {
+   "layer": 12,
+   "budget": 0.05,
+   "full": 0.34972447367133125,
+   "full_ci": [
+    0.30667259044675016,
+    0.38992326471540445
+   ],
+   "denominator_only": 2.5141565595906195,
+   "denominator_only_ci": [
+    2.2549602660422363,
+    2.7667213549116765
+   ],
+   "denominator_plain_tail_mean": 0.8285390211864829,
+   "denominator_plain_tail_mean_ci": [
+    0.7392889661343507,
+    0.9156889929547184
+   ]
+  },
+  {
+   "layer": 12,
+   "budget": 0.1,
+   "full": 0.3492238429192631,
+   "full_ci": [
+    0.3121937377449888,
+    0.39205149204405276
+   ],
+   "denominator_only": 2.513480451520814,
+   "denominator_only_ci": [
+    2.196138116031028,
+    2.8316641391986166
+   ],
+   "denominator_plain_tail_mean": 0.7247389301511689,
+   "denominator_plain_tail_mean_ci": [
+    0.6541678368087441,
+    0.7942447021368316
+   ]
+  },
+  {
+   "layer": 12,
+   "budget": 0.2,
+   "full": 0.3837682979965722,
+   "full_ci": [
+    0.3464849707209063,
+    0.42053287712257154
+   ],
+   "denominator_only": 2.188214846076384,
+   "denominator_only_ci": [
+    1.9068899973290292,
+    2.455990378730302
+   ],
+   "denominator_plain_tail_mean": 0.629064850133278,
+   "denominator_plain_tail_mean_ci": [
+    0.572389409975508,
+    0.6850991676127598
+   ]
+  },
+  {
+   "layer": 12,
+   "budget": 0.4,
+   "full": 0.4917857042133739,
+   "full_ci": [
+    0.44815214948057175,
+    0.5381190197829996
+   ],
+   "denominator_only": 1.4879130818255266,
+   "denominator_only_ci": [
+    1.3434794210168204,
+    1.6126337674417361
+   ],
+   "denominator_plain_tail_mean": 0.5807300060542435,
+   "denominator_plain_tail_mean_ci": [
+    0.5342552590695075,
+    0.6291314335831544
+   ]
+  },
+  {
+   "layer": 24,
+   "budget": 0.05,
+   "full": 0.5074217853921875,
+   "full_ci": [
+    0.4157555661357851,
+    0.6167490271758647
+   ],
+   "denominator_only": 1.8528410379367997,
+   "denominator_only_ci": [
+    1.652470338627643,
+    2.107200143639
+   ],
+   "denominator_plain_tail_mean": 0.9277191014107492,
+   "denominator_plain_tail_mean_ci": [
+    0.7645539125373679,
+    1.1126706455579911
+   ]
+  },
+  {
+   "layer": 24,
+   "budget": 0.1,
+   "full": 0.553099042364326,
+   "full_ci": [
+    0.4549684378993196,
+    0.6532418789725264
+   ],
+   "denominator_only": 1.613151592218243,
+   "denominator_only_ci": [
+    1.4195679222361195,
+    1.8761234396695476
+   ],
+   "denominator_plain_tail_mean": 0.7787827257147728,
+   "denominator_plain_tail_mean_ci": [
+    0.6859124547958638,
+    0.8713501310341409
+   ]
+  },
+  {
+   "layer": 24,
+   "budget": 0.2,
+   "full": 0.5890064720177592,
+   "full_ci": [
+    0.5215857651245038,
+    0.6555350020990649
+   ],
+   "denominator_only": 1.315052887402856,
+   "denominator_only_ci": [
+    1.185035775034259,
+    1.4765554803680039
+   ],
+   "denominator_plain_tail_mean": 0.6748923474330837,
+   "denominator_plain_tail_mean_ci": [
+    0.6319500813849976,
+    0.7215936294935328
+   ]
+  },
+  {
+   "layer": 24,
+   "budget": 0.4,
+   "full": 0.7937428245722248,
+   "full_ci": [
+    0.7054870548698826,
+    0.8561369133365779
+   ],
+   "denominator_only": 1.054821238329635,
+   "denominator_only_ci": [
+    0.9900578363363376,
+    1.1317917899962269
+   ],
+   "denominator_plain_tail_mean": 0.8099506363892821,
+   "denominator_plain_tail_mean_ci": [
+    0.734042461559662,
+    0.8652756744353393
+   ]
+  },
+  {
+   "layer": 35,
+   "budget": 0.05,
+   "full": 0.5512910361824401,
+   "full_ci": [
+    0.4371321329242099,
+    0.683190315463284
+   ],
+   "denominator_only": 1.7634740798368174,
+   "denominator_only_ci": [
+    1.6084082473301697,
+    1.9234736029710902
+   ],
+   "denominator_plain_tail_mean": 1.0949303475869225,
+   "denominator_plain_tail_mean_ci": [
+    0.879690133519665,
+    1.319031740452901
+   ]
+  },
+  {
+   "layer": 35,
+   "budget": 0.1,
+   "full": 0.4742087221630131,
+   "full_ci": [
+    0.4057637668812674,
+    0.5453784018149643
+   ],
+   "denominator_only": 1.783308707691178,
+   "denominator_only_ci": [
+    1.6313610098547033,
+    1.930391025375851
+   ],
+   "denominator_plain_tail_mean": 0.8796636073511633,
+   "denominator_plain_tail_mean_ci": [
+    0.747774795519891,
+    1.028482404361135
+   ]
+  },
+  {
+   "layer": 35,
+   "budget": 0.2,
+   "full": 0.3946856209982552,
+   "full_ci": [
+    0.3379337578863815,
+    0.4491417026039186
+   ],
+   "denominator_only": 1.6427555373112102,
+   "denominator_only_ci": [
+    1.5184712659521955,
+    1.7560569239832635
+   ],
+   "denominator_plain_tail_mean": 0.5964401394846723,
+   "denominator_plain_tail_mean_ci": [
+    0.5132769081614893,
+    0.6760595525101717
+   ]
+  },
+  {
+   "layer": 35,
+   "budget": 0.4,
+   "full": 0.4399794350030386,
+   "full_ci": [
+    0.349530185978212,
+    0.5431839228740862
+   ],
+   "denominator_only": 1.497416581520868,
+   "denominator_only_ci": [
+    1.3699007112403692,
+    1.6181705425293385
+   ],
+   "denominator_plain_tail_mean": 0.5203802978465696,
+   "denominator_plain_tail_mean_ci": [
+    0.4205634773092862,
+    0.6240816313741039
+   ]
+  }
+ ]
+}

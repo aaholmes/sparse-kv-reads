@@ -152,6 +152,17 @@ def _sample(h, S, a, C=256):
 SAMPLE_GRID_CONDITIONS = ([("dense", {}), _fused(0.15)]
                           + [_sample(h, S, a) for h in (0.05, 0.1, 0.2) for S in (8, 32) for a in (0.1, 0.5)])
 SAMPLE_FOCUS_CONDITIONS = [("dense", {})] + [_sample(h, S, 0.5) for h in (0.1, 0.2) for S in (8, 32)]
+def _tail(b, order=1, C=256):
+    return ("sphere_tail", {"budget": b, "order": order, "C": C, "window": 64, "delta": 0.03,
+                            "group": "sum_share", "check_every": 16})
+
+
+# Estimating the dropped bins from per-bin sums; dropping with the same bins as a matched control.
+TAIL_CONDITIONS = ([("dense", {})] + [_tail(b) for b in (0.05, 0.1, 0.2, 0.4)]
+                   + [_tail(b, "drop") for b in (0.1, 0.2)])
+# Convergence at large budgets, and the estimate on every layer but the first.
+TAIL_CONV_CONDITIONS = [("dense", {})] + [_tail(b, o) for b in (0.7, 1.0) for o in (1, "drop")]
+TAIL_NO_L0_CONDITIONS = [("dense", {})] + [(i, {**c, "drop_layers": [0]}) for i, c in (_tail(0.1), _tail(0.2))]
 # Reference: weight-only quantization of the same model, compared with BF16 on the same chunks.
 QUANT8_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 8})]
 QUANT4_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 4, "group_size": 128})]
@@ -167,7 +178,8 @@ CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
                      "fused_hi": FUSED_HI_CONDITIONS, "fused_hi_only": FUSED_HI_ONLY_CONDITIONS,
                      "fused_C_scan": FUSED_C_SCAN_CONDITIONS, "sample_grid": SAMPLE_GRID_CONDITIONS,
                      "sample_focus": SAMPLE_FOCUS_CONDITIONS, "quant8": QUANT8_CONDITIONS,
-                     "quant4": QUANT4_CONDITIONS}
+                     "quant4": QUANT4_CONDITIONS, "tail": TAIL_CONDITIONS,
+                     "tail_conv": TAIL_CONV_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
 
 
 def _total_budget(impl: str, cfg: dict) -> int | None:
