@@ -14,7 +14,7 @@ All results use bf16 on one consumer GPU, an RTX 5060 Ti with 16 GB of memory an
 | 32,768 | 337 | 109 (3.1×) | 57 (5.9×) |
 | 65,536 | 660 | 182 (3.6×) | 80 (8.3×) |
 
-**End-to-end decoding** (whole model, 32,768-token context, ms per token). Only the attention kernel differs between columns. The exact baseline is the faster of two exact kernels: the engine's own, and FlashInfer (0.2–0.6 ms per token slower here; see [below](#end-to-end-decoding-details)). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's, on 8 WikiText-103 chunks with 95% bootstrap intervals over chunks, and the fraction of tokens where both pick the same top token ("top-1"):
+**End-to-end decoding** (whole model, 32,768-token context, ms per token). Only the attention kernel differs between columns. The exact baseline is the faster of two exact kernels: the engine's own, and FlashInfer (0.2–0.6 ms per token slower here; see [How speed is measured](#how-speed-is-measured)). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's, on 8 WikiText-103 chunks with 95% bootstrap intervals over chunks, and the fraction of tokens where both pick the same top token ("top-1"):
 
 | model | exact | 20% budget | 5% budget |
 |---|---|---|---|
@@ -82,39 +82,11 @@ Fidelity is measured as total variation distance (TVD) between the model's next-
 
 At 32,768 tokens the advantage shrinks: matching 64-sample sampling takes 0.50× its reads, and 256-sample sampling is not matched within a 40% budget. On Qwen3-0.6B it matches 64-sample sampling with 0.23–0.26× the reads, and on Python code every TVD is 2–3× lower than on WikiText. Choosing random regions instead gives 3–4× the TVD (at 2048 tokens), so the ranking does the work.
 
-*Attention per layer, compared with FlashInfer.* FlashInfer is the exact decode-attention library used by serving engines such as SGLang; here it runs its single-sequence decode on a contiguous copy of the cache. Timings are for one layer with Qwen3-4B's head layout, both sides captured in CUDA graphs (a recorded sequence of GPU operations replayed with one launch), with the L2 cache flushed before each call; each is the median of 100 calls, and our step includes region maintenance and selection:
-
-| context | FlashInfer | `voronoi_skip`, 20% budget | `voronoi_skip`, 5% budget |
-|---|---|---|---|
-| 8192 | 92 µs | 55 µs (1.67×) | 45 µs (2.06×) |
-| 16384 | 174 µs | 74 µs (2.36×) | 49 µs (3.56×) |
-| 32768 | 337 µs | 109 µs (3.11×) | 57 µs (5.89×) |
-| 65536 | 660 µs | 182 µs (3.63×) | 80 µs (8.25×) |
-
-FlashInfer reads the cache at 364–407 GB/s, close to the card's nominal 448 GB/s, and PyTorch's own attention is within 2–8% of it: exact decode is limited by memory bandwidth, so the remaining gain has to come from reading less.
-
-<a id="end-to-end-decoding-details"></a>*End-to-end decoding.* The model runs in my own Qwen3 inference engine; for speed, each decode step is captured as one CUDA graph, removing Python overhead. This is done by `GraphDecoder` (`src/ssa/models/graph_decode.py`), which reruns the engine's per-token forward pass with the engine's own layers, weights and cache, so only the attention kernel differs between conditions. Two exact kernels are timed:
-
-- **The engine's own** Triton kernel, which splits each sequence across thread blocks and merges the parts (flash-decoding).
-- **FlashInfer's paged decode.** FlashInfer expects the cache in pages; it reads the engine's contiguous cache in place, viewed as 16-token pages without copying, and is told the new length by the CPU before each token. Per layer it is as fast as its single-sequence decode, but end to end it is 0.2–0.6 ms per token slower, most likely because of that per-token step. An engine that does this step more cheaply would bring FlashInfer closer to the engine's kernel, which is why the faster of the two is used as the baseline.
-
-Speedups are relative to the faster exact kernel, the engine's own (`decode_speed --graph --flashinfer`; bf16, batch 1; median ms per token over 3 repeats of 64 steps):
-
-| model | context | exact, engine's kernel | exact, FlashInfer | 20% budget | 5% budget |
-|---|---|---|---|---|---|
-| Qwen3-0.6B | 16384 | 9.4 ms | 9.8 ms | 6.7 ms (1.40×) | 5.9 ms (1.58×) |
-| Qwen3-0.6B | 32768 | 14.0 ms | 14.2 ms | 7.7 ms (1.81×) | 6.3 ms (2.22×) |
-| Qwen3-0.6B | 40448 | 16.0 ms | 16.6 ms | 8.3 ms (1.93×) | 6.5 ms (2.46×) |
-| Qwen3-4B | 16384 | 29.1 ms | 29.4 ms | 25.5 ms (1.14×) | 24.6 ms (1.18×) |
-| Qwen3-4B | 32768 | 34.8 ms | 35.1 ms | 26.8 ms (1.30×) | 25.0 ms (1.39×) |
-
-Rows at 16,384 and 32,768 tokens for Qwen3-0.6B come from the batched sweep's batch-1 run (`decode_speed_af689118_b1_Qwen3-0.6B.json`); the others from `decode_speed_7a026cd8_*_flashinfer.json`.
-
-Fidelity at these settings: on Qwen3-4B at 32,768 tokens a 20% budget gives TVD 0.064 [0.052, 0.074] (64-sample sampling: 0.057); on Qwen3-0.6B a 10% budget already matches 64-sample sampling (0.091 compared with 0.095), and a 20% budget reads more. A 5% budget gives TVD 0.111 [0.093, 0.127] on Qwen3-4B (86.9% top-1 agreement with the exact model) and 0.133 [0.116, 0.147] on Qwen3-0.6B (84.8%), both at 32,768 tokens; fidelity at 40,448 tokens was not measured. The gain follows attention's share of the time per token: Qwen3-4B's 8 GB of weights cost ~22 ms to read, so the cache only matters at long context or when many sequences are batched.
+<a id="how-speed-is-measured"></a>*How speed is measured.* The model runs in my own Qwen3 inference engine. `GraphDecoder` (`src/ssa/models/graph_decode.py`) reruns the engine's per-token forward pass, with the engine's own layers, weights and cache, as one CUDA graph (a recorded sequence of GPU operations replayed with one launch), so only the attention kernel differs between conditions. Two exact kernels are timed: the engine's own Triton kernel, which splits each sequence across thread blocks and merges the parts (flash-decoding), and FlashInfer's paged decode, which reads the engine's contiguous cache in place as 16-token pages and is told the new length by the CPU before each token. Per layer FlashInfer is as fast as its single-sequence decode, but end to end it is 0.2–0.6 ms per token slower, most likely because of that per-token step, so speedups are reported relative to the faster of the two. Per-layer timings flush the L2 cache before each call and take the median of 100 calls; end-to-end timings take the median of 3 repeats of 64 steps. Full tables, with every context length and both exact kernels, are in [docs/results.md](docs/results.md).
 
 *Sampling the skipped regions loses.* Reading the top regions exactly and sampling some of the rest, weighted by inverse inclusion probability, removes the bias. But at equal reads its TVD is 24–54% higher than reading more top regions, on both models and at 8192 and 32,768 tokens. Its error is almost all variance: after the top regions, the remaining attention is spread thinly over ~200 regions, and a few sampled regions estimate that tail less accurately than dropping it does.
 
-More detail, including kernel timings, context-length and region-count scans, and a comparison with weight quantization, is in [docs/results.md](docs/results.md).
+More detail, including context-length and region-count scans and a comparison with weight quantization, is in [docs/results.md](docs/results.md).
 
 ## Related work
 
