@@ -164,6 +164,12 @@ TAIL_CONDITIONS = ([("dense", {})] + [_tail(b) for b in (0.05, 0.1, 0.2, 0.4)]
 # Convergence at large budgets, and the estimate on every layer but the first.
 TAIL_CONV_CONDITIONS = [("dense", {})] + [_tail(b, o) for b in (0.7, 1.0) for o in (1, "drop")]
 TAIL_NO_L0_CONDITIONS = [("dense", {})] + [(i, {**c, "drop_layers": [0]}) for i, c in (_tail(0.1), _tail(0.2))]
+# Quest-style pages (our exact set, shared selection) and voronoi_skip in one sweep, both in PyTorch.
+QUEST_VS_VORONOI_CONDITIONS = (
+    [("dense", {})]
+    + [("quest_matched", {"budget": b, "page": 16, "window": 64}) for b in (0.1, 0.2, 0.3, 0.4)]
+    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.05, 0.1, 0.2, 0.4)]
+)
 # Reference: weight-only quantization of the same model, compared with BF16 on the same chunks.
 QUANT8_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 8})]
 QUANT4_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 4, "group_size": 128})]
@@ -180,7 +186,7 @@ CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
                      "fused_C_scan": FUSED_C_SCAN_CONDITIONS, "sample_grid": SAMPLE_GRID_CONDITIONS,
                      "sample_focus": SAMPLE_FOCUS_CONDITIONS, "quant8": QUANT8_CONDITIONS,
                      "quant4": QUANT4_CONDITIONS, "tail": TAIL_CONDITIONS,
-                     "tail_conv": TAIL_CONV_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
+                     "tail_conv": TAIL_CONV_CONDITIONS, "quest_vs_voronoi": QUEST_VS_VORONOI_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
 
 
 def _total_budget(impl: str, cfg: dict) -> int | None:

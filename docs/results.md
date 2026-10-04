@@ -123,3 +123,23 @@ Needle-in-a-haystack tasks modelled on RULER's (`ssa.harness.needle`, my own imp
 - K+V reads were 21–22% at the 20% budget and 6–7% at 5%.
 - Of the 27 errors, 15 are near misses (the right number with one or two digits wrong, dropped or repeated: the needle was found but not every digit token was read) and 12 are a different number, 11 of them on multi-key. Whether those were the distractor needles was not recorded.
 - Limits: exact attention scores 100%, so this test cannot separate conditions above the 20% budget; a needle is unusual text in its haystack and may be easier to find than other retrieval targets; RULER's harder task types (multi-value, variable tracking, aggregation) and LongBench were not run.
+
+## Comparison with Quest
+
+Quest (arXiv:2406.10774) splits the cache into 16-token pages, stores each page's element-wise minimum and maximum keys, and reads the pages with the highest bound `Σ_i max(q_i·min_i, q_i·max_i)` on `q·k` (`ssa.attn.quest`). `quest_matched` adds `voronoi_skip`'s always-read tokens (token 0 and the last 64) and one shared selection per KV head, so the remaining differences are pages by position compared with regions by direction, and Quest's bound compared with our score. Reads include each method's summaries: Quest's two keys per page cost ~6% of K+V rows.
+
+End to end (`accept_sweep --preset quest_vs_voronoi`, both methods in PyTorch in one sweep; `src/ssa/results/tvd_4b_8k_quest_vs_voronoi.json`; `ssa.harness.matched_reads` interpolates each chunk's TVD along each curve and bootstraps over chunks):
+
+| K+V reads | TVD, `quest_matched` | TVD, `voronoi_skip` | ratio [95% CI] |
+|---|---|---|---|
+| 20% | 0.0555 | 0.0487 | 1.14 [1.10, 1.18] |
+| 23% | 0.0489 | 0.0434 | 1.13 [1.08, 1.17] |
+| 27% | 0.0413 | 0.0393 | 1.05 [1.01, 1.10] |
+| 30% | 0.0377 | 0.0365 | 1.03 [0.99, 1.08] |
+| 37% | 0.0305 | 0.0307 | 1.00 [0.95, 1.04] |
+| 42% | 0.0270 | 0.0271 | 1.00 [0.95, 1.04] |
+
+`quest_matched` cannot read less than 17%; `voronoi_skip` reaches 8% (TVD 0.084).
+
+Offline, per layer (`ssa.harness.quest_replay`, 8 WikiText contexts at 8k, single-layer attention-output error; `src/ssa/results/quest_replay_0a8e6747.json`), the comparison goes both ways: `quest_matched` has 1.3–1.9× our error at layer 12 at 10–30% reads, 0.27–0.88× at layer 24, and crosses over at layer 35 (1.58× at 10%, 0.74× at 30%). `quest_plain`, which pages every token and lets each query head choose its own pages, has 8–127× our error at 15–30% reads: heads that attend mostly to recent tokens lose them, because the bound over 128 dimensions is too loose to rank those pages near the top. The Quest paper keeps the first two layers dense and does not state whether recent tokens are always read or whether selection is per head; these runs apply sparsity to every layer for both methods.
+

@@ -49,7 +49,7 @@ More than half of the errors are near misses: the right number with one or two d
 - **Attention gets much faster, and more so at longer context.** FlashInfer already reads the cache at 81–91% of the card's bandwidth, so the gain comes from reading less, not from a faster kernel.
 - **End to end, the weights limit the gain at batch 1.** Reading Qwen3-4B's 8 GB of weights takes ~22 ms of each token's 34.8 ms, so even free attention could not exceed about 1.6×. Batching helps, because the weights are read once per batch while each sequence's cache is read separately (table above).
 - **Fidelity costs something.** A 20% budget is about as close to the exact model as 64-sample SANTA-style sampling (TVD 0.057), which reads every key; a 5% budget lies between 8-bit and naive 4-bit weight quantization of Qwen3-4B (TVD 0.018 and 0.144, measured at 8,192 tokens).
-- **Not yet done:** sequences of different lengths in one batch; harder long-context tasks (RULER's multi-value, tracking and aggregation tasks, LongBench); direct comparison with the closest prior methods, Quest and ClusterKV (see [Related work](#related-work)); datacenter GPUs; integration into a serving engine such as SGLang.
+- **Not yet done:** sequences of different lengths in one batch; harder long-context tasks (RULER's multi-value, tracking and aggregation tasks, LongBench); direct comparison with ClusterKV, the closest prior method (see [Related work](#related-work)); datacenter GPUs; integration into a serving engine such as SGLang.
 
 ## Method
 
@@ -92,6 +92,8 @@ More detail, including context-length and region-count scans and a comparison wi
 
 After building this, I found that it is close in spirit to ClusterKV ([arXiv:2412.03213](https://arxiv.org/abs/2412.03213)), which also groups keys by direction (with k-means clustering) and reads the top groups exactly. The differences are that here keys are mean-centered first, the groups come from fixed random directions updated incrementally instead of periodic clustering, groups are scored by mean direction times maximum or minimum length, one selection is shared by the query heads of each KV head, and a recent window is always read. Quest ([arXiv:2406.10774](https://arxiv.org/abs/2406.10774)) selects fixed 16-token pages using per-page minimum and maximum keys. MagicPIG ([arXiv:2410.16179](https://arxiv.org/abs/2410.16179)) also centers keys, then samples them with locality-sensitive hashing. SANTA++ ([arXiv:2609.35629](https://arxiv.org/abs/2609.35629)), from SANTA's authors, samples groups of keys.
 
+*Compared with Quest at matched reads* (Qwen3-4B, 8,192 tokens, end-to-end TVD on 8 WikiText-103 chunks, paired by chunk; details in [docs/results.md](docs/results.md#comparison-with-quest)). Given the same always-read tokens and one shared selection per KV head, Quest-style pages have 5–14% higher TVD than `voronoi_skip` at 20–27% of K+V rows read and are tied from 30%. Quest's per-page minimum and maximum keys cost ~6% of reads, so it cannot read less than ~17%. Without those additions, selecting pages per query head, Quest misses heads that attend to recent tokens, and its single-layer error is 8–127× ours. Most of the advantage over Quest therefore comes from always reading recent tokens, sharing one selection per KV head and cheaper summaries; grouping keys by direction rather than position adds little.
+
 ## Earlier work: sampling the cache
 
 Before the method above, I reproduced SANTA's sampling estimator in PyTorch and tested extensions of it: exact computation of the heaviest tokens, contiguous-block sampling, cluster-based key skipping, and a learned correction for sampling bias. Plain systematic sampling matches exact perplexity within +0.19% while reading 3.5% of cached values; none of the extensions beat it. Details are in [docs/sampling.md](docs/sampling.md).
@@ -104,7 +106,7 @@ Before the method above, I reproduced SANTA's sampling estimator in PyTorch and 
 - `src/ssa/harness/` — experiments: `accept_sweep` measures TVD end to end, `decode_speed` times decoding, `kernel_bench` times the kernels; others cover the sampling work. Real-model harnesses need a CUDA GPU and download the model.
 - `src/ssa/results/` — result files, each recording the git commit, GPU and library versions that produced it.
 
-Setup: `uv sync`, then `uv run python -m pytest` (276 tests; the kernel tests need a CUDA GPU and the FlashInfer comparison needs FlashInfer, and both are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
+Setup: `uv sync`, then `uv run python -m pytest` (284 tests; the kernel tests need a CUDA GPU and the FlashInfer comparison needs FlashInfer, and both are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
 
 ## License
 

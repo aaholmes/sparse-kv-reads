@@ -126,6 +126,18 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
 
     def op(q, full_k, full_v, *, scale, layer_idx):
         qd = q[0, :, 0, :]                          # [H, d]
+        if impl == "quest_matched":                 # Quest-style pages, our exact set and shared selection
+            from ..attn.labeled import label_weighted_attention
+            from ..attn.quest import quest_labels_and_weights
+            Kc, Vc = full_k[0], full_v[0]
+            n_k = Kc.shape[1]
+            labels, w = quest_labels_and_weights(qd, Kc, n=n_k, budget=float(cfg["budget"]), variant="quest_matched",
+                                                 page=int(cfg.get("page", 16)), window=int(cfg.get("window", 64)))
+            out = label_weighted_attention(qd, Kc, Vc, labels, w)
+            rows = (torch.gather(w, 1, labels) > 0).sum(1).float()                # [H_kv]
+            stats.record(n_k=n_k, reads_per_head=rows, kv_rows=float(2 * rows.mean()) + 2 * (w.shape[1] - 1))
+            counter["step"] += 1
+            return out.view(1, -1, 1, qd.shape[1])
         if tail is not None:                        # order=1: estimate dropped bins; order="drop" (or a layer
                                                     # in drop_layers): drop them
             from ..attn.labeled import label_weighted_attention
