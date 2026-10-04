@@ -35,10 +35,21 @@ All results use bf16 on one consumer GPU, an RTX 5060 Ti with 16 GB of memory an
 
 The speedup tracks the total number of tokens cached across the batch, relative to the size of the weights. With 16 GB, Qwen3-4B fits only ~32k cached tokens beside its 8 GB of weights, which caps its gain on this card; fidelity is unchanged by batching.
 
+**Long-context retrieval** (needle-in-a-haystack tasks modelled on RULER, in my own implementation: a 7-digit number is hidden at a random depth in WikiText-103 text and the prompt asks for it; "multi-key" hides four numbers under different keys and asks for one). Qwen3-4B, 100 examples per cell; the question and the answer go through the sparse decode path. Accuracy, with the paired difference from exact and its 95% interval:
+
+| context | task | exact | 20% budget | 5% budget |
+|---|---|---|---|---|
+| 16,384 | single | 1.00 | 1.00 | 0.97 (−0.03 [−0.07, 0.00]) |
+| 16,384 | multi-key | 1.00 | 1.00 | 0.95 (−0.05 [−0.10, −0.01]) |
+| 32,768 | single | 1.00 | 0.99 (−0.01 [−0.03, 0.00]) | 0.92 (−0.08 [−0.14, −0.03]) |
+| 32,768 | multi-key | 1.00 | 0.98 (−0.02 [−0.05, 0.00]) | 0.92 (−0.08 [−0.14, −0.03]) |
+
+More than half of the errors are near misses: the right number with one or two digits wrong.
+
 - **Attention gets much faster, and more so at longer context.** FlashInfer already reads the cache at 81–91% of the card's bandwidth, so the gain comes from reading less, not from a faster kernel.
 - **End to end, the weights limit the gain at batch 1.** Reading Qwen3-4B's 8 GB of weights takes ~22 ms of each token's 34.8 ms, so even free attention could not exceed about 1.6×. Batching helps, because the weights are read once per batch while each sequence's cache is read separately (table above).
 - **Fidelity costs something.** A 20% budget is about as close to the exact model as 64-sample SANTA-style sampling (TVD 0.057), which reads every key; a 5% budget lies between 8-bit and naive 4-bit weight quantization of Qwen3-4B (TVD 0.018 and 0.144, measured at 8,192 tokens).
-- **Not yet done:** sequences of different lengths in one batch; long-context task benchmarks (RULER, LongBench); direct comparison with the closest prior methods, Quest and ClusterKV (see [Related work](#related-work)); datacenter GPUs; integration into a serving engine such as SGLang.
+- **Not yet done:** sequences of different lengths in one batch; harder long-context tasks (RULER's multi-value, tracking and aggregation tasks, LongBench); direct comparison with the closest prior methods, Quest and ClusterKV (see [Related work](#related-work)); datacenter GPUs; integration into a serving engine such as SGLang.
 
 ## Method
 
@@ -121,7 +132,7 @@ Before the method above, I reproduced SANTA's sampling estimator in PyTorch and 
 - `src/ssa/harness/` — experiments: `accept_sweep` measures TVD end to end, `decode_speed` times decoding, `kernel_bench` times the kernels; others cover the sampling work. Real-model harnesses need a CUDA GPU and download the model.
 - `src/ssa/results/` — result files, each recording the git commit, GPU and library versions that produced it.
 
-Setup: `uv sync`, then `uv run python -m pytest` (272 tests; the kernel tests need a CUDA GPU and the FlashInfer comparison needs FlashInfer, and both are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
+Setup: `uv sync`, then `uv run python -m pytest` (276 tests; the kernel tests need a CUDA GPU and the FlashInfer comparison needs FlashInfer, and both are skipped otherwise). The engine is installed from [github.com/aaholmes/llms](https://github.com/aaholmes/llms) at a pinned commit.
 
 ## License
 

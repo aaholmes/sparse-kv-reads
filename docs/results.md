@@ -108,3 +108,18 @@ Reading the weights costs a fixed amount per token (8 GB for Qwen3-4B, ~22 ms; 1
 - **The speedup grows with batch size and tracks the batch's total cached tokens:** for Qwen3-0.6B with 32k cached tokens in total, 1.81× (1 × 32k), 1.63× (2 × 16k), 1.58× (4 × 8k); with 64k, 2.15×, 2.02×, 1.91×. Weights are read once per step for the whole batch, while every sequence's cache is read separately, so the cache's share of each step grows with the batch.
 - **Fidelity is unchanged by batching:** TVD from the engine's exact decoding at a 20% budget, on one chunk per setting, is 0.054–0.076 for Qwen3-0.6B and 0.042–0.049 for Qwen3-4B, the same range as at batch 1.
 - Exact throughput grows less than proportionally with batch size at long context (Qwen3-0.6B at 32k: 71 → 87 tokens/s from batch 1 to 2), because the cache reads grow with the batch.
+
+## Long-context retrieval
+
+Needle-in-a-haystack tasks modelled on RULER's (`ssa.harness.needle`, my own implementation, not official RULER scores). A sentence "The special magic number for KEY is: NNNNNNN." is inserted at a random depth (at a sentence boundary) in WikiText-103 text, and the prompt ends by asking for the number; `multi-key` inserts four such sentences with different keys and asks for one. The prompt is processed with exact attention except its last 64 tokens, which contain the question; those and the generated answer go through the decode path, so the answer depends on what sparse attention reads. Greedy decoding; an example is correct when the first number generated is the needle's. All conditions share the prompts and prefilled cache, so differences are paired. Qwen3-4B, 100 examples per cell (`src/ssa/results/needle_0b08ed17.json`).
+
+| context | task | exact | 20% budget | 5% budget |
+|---|---|---|---|---|
+| 16,384 | single | 1.00 | 1.00 (+0.00) | 0.97 (−0.03 [−0.07, 0.00]) |
+| 16,384 | multi-key | 1.00 | 1.00 (+0.00) | 0.95 (−0.05 [−0.10, −0.01]) |
+| 32,768 | single | 1.00 | 0.99 (−0.01 [−0.03, 0.00]) | 0.92 (−0.08 [−0.14, −0.03]) |
+| 32,768 | multi-key | 1.00 | 0.98 (−0.02 [−0.05, 0.00]) | 0.92 (−0.08 [−0.14, −0.03]) |
+
+- K+V reads were 21–22% at the 20% budget and 6–7% at 5%.
+- Of the 27 errors, 15 are near misses (the right number with one or two digits wrong, dropped or repeated: the needle was found but not every digit token was read) and 12 are a different number, 11 of them on multi-key. Whether those were the distractor needles was not recorded.
+- Limits: exact attention scores 100%, so this test cannot separate conditions above the 20% budget; a needle is unusual text in its haystack and may be easier to find than other retrieval targets; RULER's harder task types (multi-value, variable tracking, aggregation) and LongBench were not run.
