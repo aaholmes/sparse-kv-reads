@@ -14,6 +14,16 @@ Pure PyTorch, so it runs on CPU as well.
 shared by all heads. ``partition="kmeans"`` fits ``C`` centroids per KV head by cosine k-means on
 the centered keys at the first build (the end of the prompt) and keeps them: later keys join the
 nearest centroid, and recentering rebins with the centroids unchanged.
+
+Split on overflow (v1; ``C_init < C`` and ``split_factor > 0``, with ``partition="kmeans"``): only
+``C_init`` clusters are fitted, leaving ``C − C_init`` spare slots, and a cluster may hold at most
+``cap = split_factor ×`` the mean cluster size at the fit. Right after the fit, each cluster over
+the cap is divided by k-means over its own keys into about ``size ÷ mean size`` clusters, and any
+piece still over the cap is split in two until none is. Afterwards only a cluster that has just
+received a key is tested, and one over the cap is split in two by 2-means on its keys' directions;
+when 2-means would leave a half with under a quarter of the keys, the cluster is cut at the median
+of the keys' projections on the line between the two centroids instead. New clusters take spare
+slots, and splitting stops when none are left. Clusters are never merged (a v2 question).
 """
 
 from __future__ import annotations
@@ -28,13 +38,76 @@ from .sphere_skip import fixed_directions
 GROUPS = ("per_head", "max", "max_rel", "sum_share")
 
 
+def _kmeans_padded(Kn: torch.Tensor, valid: torch.Tensor, k: torch.Tensor, iters: int) -> torch.Tensor:
+    """Cosine k-means on each row of ``Kn [S, M, d]`` (unit vectors; ``valid [S, M]`` marks real
+    entries) into ``k [S]`` parts, starting from evenly spaced members. Returns ``part [S, M]``."""
+    S, M, d = Kn.shape
+    N = int(k.max())
+    j = torch.arange(N, device=Kn.device).unsqueeze(0)
+    init = (j * valid.sum(1, keepdim=True) // k.unsqueeze(1)).clamp(max=M - 1)
+    cent = Kn.gather(1, init.unsqueeze(-1).expand(S, N, d)).clone()
+    spare = (j >= k.unsqueeze(1)).unsqueeze(1)
+    wv = valid.to(Kn.dtype)
+    for it in range(iters + 1):
+        part = torch.einsum("smd,snd->smn", Kn, cent).masked_fill(spare, -math.inf).argmax(-1)
+        if it == iters:
+            break
+        sums = torch.zeros_like(cent).scatter_add_(1, part.unsqueeze(-1).expand(S, M, d), Kn * wv.unsqueeze(-1))
+        cnt = torch.zeros(S, N, dtype=Kn.dtype, device=Kn.device).scatter_add_(1, part, wv)
+        cent = torch.where((cnt > 0).unsqueeze(-1), torch.nn.functional.normalize(sums, dim=-1), cent)
+    return part
+
+
+def _bisect_padded(Kn: torch.Tensor, valid: torch.Tensor, min_share: float = 0.25, iters: int = 4) -> torch.Tensor:
+    """Split each row of ``Kn [S, M, d]`` in two: 2-means on cosine similarity started from the
+    first member and the member farthest from it; a row whose smaller half would hold under
+    ``min_share`` of its members is cut at the median projection on the line between the two
+    centroids instead. Returns ``side [S, M]`` (0 or 1)."""
+    S, M, d = Kn.shape
+    cnt = valid.sum(1)
+    far = torch.einsum("smd,sd->sm", Kn, Kn[:, 0]).masked_fill(~valid, math.inf).argmin(1)
+    two = torch.stack([Kn[:, 0], Kn[torch.arange(S, device=Kn.device), far]], 1).clone()
+    Kv = Kn * valid.to(Kn.dtype).unsqueeze(-1)
+    for it in range(iters + 1):
+        sim = torch.einsum("smd,sjd->smj", Kn, two)
+        side = (sim[..., 1] > sim[..., 0]) & valid
+        if it == iters:
+            break
+        s1 = (Kv * side.unsqueeze(-1)).sum(1)
+        s0 = Kv.sum(1) - s1
+        n1 = side.sum(1)
+        two = torch.stack([torch.where((cnt - n1 > 0).unsqueeze(-1), torch.nn.functional.normalize(s0, dim=-1), two[:, 0]),
+                           torch.where((n1 > 0).unsqueeze(-1), torch.nn.functional.normalize(s1, dim=-1), two[:, 1])], 1)
+    n1 = side.sum(1)
+    lopsided = (n1 < min_share * cnt) | (n1 > (1 - min_share) * cnt)
+    proj = torch.einsum("smd,sd->sm", Kn, two[:, 1] - two[:, 0]).masked_fill(~valid, math.inf)
+    order = proj.argsort(dim=1, stable=True)
+    rank = torch.empty_like(order).scatter_(1, order, torch.arange(M, device=Kn.device).expand(S, M))
+    upper = (rank >= (cnt // 2).unsqueeze(1)) & valid
+    return torch.where(lopsided.unsqueeze(1), upper, side).long()
+
+
+def bisect_directions(Xn: torch.Tensor):
+    """Split unit vectors ``Xn [m, d]`` in two (see ``_bisect_padded``): ``side [m]`` and the two
+    halves' unit mean directions ``[2, d]``."""
+    side = _bisect_padded(Xn.unsqueeze(0), torch.ones(1, Xn.shape[0], dtype=torch.bool, device=Xn.device))[0]
+    cents = torch.stack([Xn[side == j].sum(0) for j in (0, 1)])
+    return side, torch.nn.functional.normalize(cents, dim=-1)
+
+
 class SphereIndexGPU:
     def __init__(self, *, C: int = 256, window: int = 64, delta: float = 0.03, capacity: int = 65536,
                  check_every: int = 16, seed: int = 0, kind: str = "random", partition: str = "random",
-                 kmeans_iters: int = 10):
+                 kmeans_iters: int = 10, C_init: int | None = None, split_factor: float = 0.0):
         if partition not in ("random", "kmeans"):
             raise ValueError(f"unknown partition {partition!r}")
         self.partition, self.kmeans_iters = partition, kmeans_iters
+        self.C_init = C if C_init is None else C_init
+        self.split_factor = float(split_factor)
+        if self.C_init > C or (self.split_factor > 0 and partition != "kmeans"):
+            raise ValueError("C_init must be <= C, and splitting needs partition='kmeans'")
+        self.splits = 0
+        self._fresh_fit = False
         self.C, self.window, self.delta, self.capacity = C, window, delta, capacity
         self.check_every, self.seed, self.kind = check_every, seed, kind
         self.initialized = False
@@ -52,6 +125,9 @@ class SphereIndexGPU:
         self.dirs = fixed_directions(C, d, seed=self.seed, kind=self.kind, dtype=dtype, device=device)
         self.cent = torch.zeros(H_kv, C, d, **kw) if self.partition == "kmeans" else None
         self.fitted = torch.zeros(H_kv, dtype=torch.bool, device=device)
+        self.n_c = torch.full((H_kv,), self.C_init if self.partition == "kmeans" else C, dtype=torch.long,
+                              device=device)                          # active clusters per head
+        self.cap = torch.full((H_kv,), math.inf, **kw)                 # split a cluster above this many keys
         self.sum_dir = torch.zeros(H_kv, C, d, **kw)
         self.mmax = torch.zeros(H_kv, C, **kw)
         self.mmin = torch.full((H_kv, C), math.inf, **kw)
@@ -69,7 +145,12 @@ class SphereIndexGPU:
         mag = Kr.norm(dim=-1)                                              # [h, m]
         Kn = Kr / mag.clamp_min(1e-12).unsqueeze(-1)
         if self.partition == "kmeans":
-            lab = torch.einsum("hmd,hcd->hmc", Kn, self.cent[heads]).argmax(-1)
+            used = int(self.n_c[heads].max())                              # score only slots in use, in chunks
+            spare = torch.arange(used, device=self.device).unsqueeze(0) >= self.n_c[heads].unsqueeze(1)
+            lab = torch.cat([torch.einsum("hmd,hcd->hmc", Kn[:, i:i + 4096], self.cent[heads, :used])
+                             .masked_fill(spare.unsqueeze(1), -math.inf).argmax(-1)
+                             for i in range(0, m, 4096)], dim=1) if m else torch.zeros(h, 0, dtype=torch.long,
+                                                                                       device=self.device)
         else:
             lab = (Kn @ self.dirs.t()).argmax(-1)                          # [h, m]
         flat = (lab + heads.unsqueeze(1) * self.C).reshape(-1)
@@ -97,9 +178,13 @@ class SphereIndexGPU:
                 todo = ~self.fitted[heads]
                 if todo.any():
                     from .clusterkv import spherical_kmeans
-                    _, cent = spherical_kmeans(Kr[todo], C=self.C, iters=self.kmeans_iters, seed=self.seed)
-                    self.cent[heads[todo]] = cent
+                    _, cent = spherical_kmeans(Kr[todo], C=self.C_init, iters=self.kmeans_iters, seed=self.seed)
+                    self.cent[heads[todo], :self.C_init] = cent
+                    self.n_c[heads[todo]] = self.C_init
                     self.fitted[heads[todo]] = True
+                    if self.split_factor > 0:
+                        self.cap[heads[todo]] = self.split_factor * nb / self.C_init
+                        self._fresh_fit = True
             self.rbar[heads] = Kr.pow(2).sum(-1).mean(1).sqrt()
             self.labels[heads, self.start:self.end] = self._bin(Kr, heads).to(torch.int16)
         else:
@@ -113,6 +198,7 @@ class SphereIndexGPU:
         self.start = 1
         self.end = max(1, n - self.window)
         self._build(K, torch.arange(H_kv, device=K.device), None)
+        self._split_after_fit(K)
         self.initialized = True
 
     def _advance(self, K: torch.Tensor, n: int) -> None:
@@ -121,12 +207,16 @@ class SphereIndexGPU:
         if self.partition == "kmeans" and new_end > self.end and not bool(self.fitted.all()):
             self.end = new_end                                             # nothing was binned at the first build
             self._build(K, heads, None)
+            self._split_after_fit(K)
         if new_end > self.end:
             Kn = K[:, self.end:new_end].to(self.dtype)                     # [H_kv, m, d]
             self.ksum += Kn.sum(1)
             lab = self._bin(Kn - self.mu_ref.unsqueeze(1), heads)
             self.labels[:, self.end:new_end] = lab.to(torch.int16)
             self.end = new_end
+            if self.split_factor > 0:                                      # only clusters that just received a key
+                got = torch.zeros(self.H_kv, self.C, dtype=torch.bool, device=self.device).scatter_(1, lab, True)
+                self._split_overflow(K, got)
         cnt = self.end - self.start
         self.head_steps += self.H_kv
         if cnt <= 0:
@@ -141,6 +231,104 @@ class SphereIndexGPU:
                 self._build(K, flagged, mu_t[flagged])
                 self.rebuilds += int(flagged.numel())
             self.flags.zero_()
+
+    @property
+    def active_clusters(self) -> float:
+        """Mean number of clusters in use per KV head (all ``C`` unless slots are spare)."""
+        return float(self.n_c.float().mean()) if self.initialized else float(self.C)
+
+    def _before_split(self, K) -> None:
+        """Hook for subclasses that keep extra per-cluster sums: called before any split."""
+
+    def _on_split(self, K, heads: torch.Tensor, pos: torch.Tensor, slot: torch.Tensor, rows: torch.Tensor) -> None:
+        """Hook: clusters ``rows`` (flat ``head · C + slot``) were rewritten; their members are the
+        keys at ``pos`` of ``heads``, now in ``slot``."""
+
+    def _split_after_fit(self, K: torch.Tensor) -> None:
+        if self._fresh_fit:
+            self._fresh_fit = False
+            self._split_overflow(K, None, nmeans=True)
+
+    def _split_overflow(self, K: torch.Tensor, cand: torch.Tensor | None = None, nmeans: bool = False) -> None:
+        """Split clusters over their head's cap until none is, or no spare slot is left. ``cand
+        [H_kv, C]`` restricts the test to those clusters (and the pieces they are split into).
+        ``nmeans`` divides each cluster in one step into about size ÷ mean size parts first."""
+        if self.split_factor <= 0:
+            return
+        slots = torch.arange(self.C, device=self.device).unsqueeze(0)
+        first = True
+        while True:
+            over = (self.count > self.cap.unsqueeze(1)) & (slots < self.n_c.unsqueeze(1)) & (self.count >= 2)
+            if cand is not None:
+                over &= cand
+            hc = over.nonzero()                                               # host sync
+            if hc.shape[0] == 0:
+                return
+            if first:
+                self._before_split(K)
+                first = False
+            touched = torch.zeros(self.H_kv * self.C, dtype=torch.bool, device=self.device)
+            done = 0
+            for i in range(0, hc.shape[0], 64):
+                done += self._split_batch(K, hc[i:i + 64], nmeans, touched)
+            if not done and not nmeans:
+                return
+            nmeans = False
+            if cand is not None:
+                cand = cand | touched.view(self.H_kv, self.C)
+
+    def _split_batch(self, K, hc: torch.Tensor, nmeans: bool, touched: torch.Tensor) -> int:
+        """Split the clusters ``hc [S, 2]`` (head, slot; sorted by head) together. Returns how many were split."""
+        C, d, dev = self.C, self.d, self.device
+        h, c = hc[:, 0], hc[:, 1]
+        S = h.shape[0]
+        member = self.labels[h, self.start:self.end] == c.unsqueeze(1)        # [S, binned]
+        cnt = member.sum(1)
+        M = int(cnt.max())
+        rows, cols = member.nonzero(as_tuple=True)
+        rank = torch.arange(rows.shape[0], device=dev) - (cnt.cumsum(0) - cnt)[rows]
+        pos = torch.zeros(S, M, dtype=torch.long, device=dev)
+        pos[rows, rank] = cols + self.start
+        valid = torch.arange(M, device=dev).unsqueeze(0) < cnt.unsqueeze(1)
+        Kr = K[h.unsqueeze(1), pos].to(self.dtype) - self.mu_ref[h].unsqueeze(1)
+        mag = Kr.norm(dim=-1)
+        Kn = Kr / mag.clamp_min(1e-12).unsqueeze(-1)
+        if nmeans:
+            k = torch.ceil(cnt * self.split_factor / self.cap[h]).long().clamp(min=2)
+            part = _kmeans_padded(Kn, valid, k, self.kmeans_iters)
+        else:
+            part = _bisect_padded(Kn, valid)
+        N = int(part.max()) + 1
+        j = torch.arange(N, device=dev).unsqueeze(0)
+        sizes = torch.zeros(S, N, dtype=torch.long, device=dev).scatter_add_(1, part, valid.long())
+        part = ((sizes > 0).cumsum(1) - 1).gather(1, part)                    # number the non-empty parts 0, 1, ...
+        extra = (sizes > 0).sum(1) - 1                                        # new clusters each split creates
+        per_head = torch.zeros(self.H_kv, dtype=torch.long, device=dev).index_add_(0, h, extra)
+        base = self.n_c[h] + (extra.cumsum(0) - extra) - (per_head.cumsum(0) - per_head)[h]
+        keep = (extra > 0) & (base + extra <= C)                              # spare slots are given out in order
+        if not bool(keep.any()):
+            return 0
+        slot = torch.where(j == 0, c.unsqueeze(1), base.unsqueeze(1) + j - 1)                 # [S, N]
+        tgt = (h.unsqueeze(1) * C + slot)[keep.unsqueeze(1) & (j <= extra.unsqueeze(1))]
+        sel = valid & keep.unsqueeze(1)
+        hh = h.unsqueeze(1).expand(S, M)[sel]
+        new = slot.gather(1, part)[sel]
+        flat = hh * C + new
+        self.sum_dir.view(-1, d)[tgt] = 0
+        self.mmax.view(-1)[tgt] = 0
+        self.mmin.view(-1)[tgt] = math.inf
+        self.count.view(-1)[tgt] = 0
+        self.sum_dir.view(-1, d).index_add_(0, flat, Kn[sel])
+        self.mmax.view(-1).scatter_reduce_(0, flat, mag[sel], reduce="amax")
+        self.mmin.view(-1).scatter_reduce_(0, flat, mag[sel], reduce="amin")
+        self.count.view(-1).index_add_(0, flat, torch.ones_like(mag[sel]))
+        self.cent.view(-1, d)[tgt] = torch.nn.functional.normalize(self.sum_dir.view(-1, d)[tgt], dim=-1)
+        self.labels[hh, pos[sel]] = new.to(torch.int16)
+        self.n_c.index_add_(0, h[keep], extra[keep])
+        self.splits += int(extra[keep].sum())
+        touched[tgt] = True
+        self._on_split(K, hh, pos[sel], new, tgt)
+        return int(keep.sum())
 
     def observe(self, K: torch.Tensor, n: int) -> None:
         """Update from the cache ``K [H_kv, ≥n, d]`` (engine layout) holding ``n`` valid positions."""

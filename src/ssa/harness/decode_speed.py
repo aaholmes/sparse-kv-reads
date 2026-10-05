@@ -156,6 +156,11 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=1, help="sequences decoded together (equal lengths)")
     p.add_argument("--partition", default="kmeans", choices=["random", "kmeans"],
                    help="how clusters are chosen for the cluster graph conditions")
+    p.add_argument("--slots", type=int, default=256, help="cluster slots (C) for the cluster graph conditions")
+    p.add_argument("--c-init", type=int, default=None, help="clusters fitted at the prompt (default: all slots)")
+    p.add_argument("--split-factor", type=float, default=0.0,
+                   help="split a cluster above this multiple of the mean size at the fit (0 = never)")
+    p.add_argument("--split-every", type=int, default=4, help="split flagged clusters every this many flag checks")
     p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and cluster)")
     p.add_argument("--flashinfer", action="store_true",
                    help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
@@ -181,7 +186,8 @@ def main() -> None:
             ref = dense_logits(model, ids, cache, n, warmup=args.warmup, steps=args.steps)
             for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
                 if mode == "cluster":
-                    cfg = {**cfg, "partition": args.partition}
+                    cfg = {**cfg, "partition": args.partition, "C": args.slots, "C_init": args.c_init,
+                           "split_factor": args.split_factor, "split_every": args.split_every}
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)
                 r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg, "batch": args.batch,

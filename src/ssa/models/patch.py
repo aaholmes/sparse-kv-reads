@@ -114,7 +114,8 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         fused = SphereIndexFused(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                                  delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
                                  check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)),
-                                 partition=cfg.get("partition", "kmeans"))
+                                 partition=cfg.get("partition", "kmeans"), C_init=cfg.get("C_init"),
+                                 split_factor=float(cfg.get("split_factor", 0.0)))
         track = bool(cfg.get("track_reads", True))
         fused_prev = {"rebuilds": 0, "head_steps": 0}
 
@@ -124,7 +125,8 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         tail = SphereIndexTail(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                                delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
                                check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)),
-                               partition=cfg.get("partition", "kmeans"))
+                               partition=cfg.get("partition", "kmeans"), C_init=cfg.get("C_init"),
+                               split_factor=float(cfg.get("split_factor", 0.0)))
 
     def op(q, full_k, full_v, *, scale, layer_idx):
         qd = q[0, :, 0, :]                          # [H, d]
@@ -156,10 +158,10 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
                 extra = 0.0
             else:
                 out = attend_with_tail(tail, qd, Kc, Vc, labels, w, order=int(order)).to(qd.dtype)
-                extra = tail.C * (1 + 3 / d)                 # value sums + three scalars per bin
+                extra = tail.active_clusters * (1 + 3 / d)   # value sums + three scalars per cluster
             rows = (torch.gather(w, 1, labels.long()) > 0).sum(1).float()         # [H_kv]
             stats.record(n_k=n_k, reads_per_head=rows,
-                         kv_rows=float(2 * rows.mean()) + tail.C * (1 + 2 / d) + extra)
+                         kv_rows=float(2 * rows.mean()) + tail.active_clusters * (1 + 2 / d) + extra)
             counter["step"] += 1
             return out.view(1, -1, 1, d)
         if fused is not None:                       # reads the cache in place: [H_kv, n, d] views, no copy
@@ -177,7 +179,7 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
                 wk = w if w.shape[0] == Kc.shape[0] else w.view(Kc.shape[0], -1, w.shape[1]).amax(1)
                 rows = (torch.gather(wk, 1, labels.long()) > 0).sum(1).float()        # [H_kv]
                 stats.record_gpu(n_k=n_k, reads_mean=rows.mean(),
-                                 kv_rows=2 * rows.mean() + fused.C * (1 + 2 / qd.shape[1]))
+                                 kv_rows=2 * rows.mean() + fused.n_c.float().mean() * (1 + 2 / qd.shape[1]))
                 stats.rebuilds += fused.rebuilds - fused_prev["rebuilds"]      # summed over layers
                 stats.head_steps += fused.head_steps - fused_prev["head_steps"]
                 fused_prev["rebuilds"], fused_prev["head_steps"] = fused.rebuilds, fused.head_steps

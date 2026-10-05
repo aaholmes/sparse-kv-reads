@@ -21,7 +21,7 @@ import triton
 import triton.language as tl
 
 from .labeled_attn import NEG, _list_kernel, _sm_count, merge_splits
-from .sphere_fused import NEG_INF, SphereIndexFused, _score_kernel
+from .sphere_fused import NEG_INF, SphereIndexFused, _score_kernel, _shared_pick
 
 
 @triton.jit
@@ -60,8 +60,8 @@ def _dense_dev_kernel(q_ptr, k_ptr, v_ptr, n_ptr, m_out, l_out, a_out, num_split
 
 
 @triton.jit
-def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                    rbar_ptr, flag_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
+def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
+                    rbar_ptr, flag_ptr, cap_ptr, oflag_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
                     C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr):
     """Bin the keys that left the recent window since the last call; update this head's
     binned count, budget in keys and drift flag. All lengths read from GPU memory."""
@@ -72,18 +72,21 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmi
     new_end = tl.maximum(tl.maximum(n - window, 1), old_end)
     mu = tl.load(mu_ptr + h * D + offs_d)
     ks = tl.load(ksum_ptr + h * D + offs_d)
+    n_act = tl.load(nact_ptr + h).to(tl.int32)             # clusters in use; later slots are spare
+    cap = tl.load(cap_ptr + h)
+    over = tl.load(oflag_ptr + h)
     for p in range(old_end, new_end):
         k = tl.load(k_ptr + h * s_kh + p * s_kn + offs_d).to(tl.float32)
         ks += k
         kr = k - mu
         mag = tl.sqrt(tl.sum(kr * kr, axis=0))
         kn = kr / tl.maximum(mag, 1e-12)
-        best = NEG_INF
-        bi = 0
-        for c0 in tl.static_range(0, C, BC):
+        best = mag * 0.0 - 2.0                             # below any cosine
+        bi = (mag * 0.0).to(tl.int32)
+        for c0 in range(0, n_act, BC):                     # only the blocks of slots in use
             offs_c = c0 + tl.arange(0, BC)
             dv = tl.load(dirs_ptr + h * s_dh + offs_c[:, None] * D + offs_d[None, :])
-            sc = tl.sum(dv * kn[None, :], axis=1)
+            sc = tl.where(offs_c < n_act, tl.sum(dv * kn[None, :], axis=1), NEG_INF)
             m = tl.max(sc, axis=0)
             am = tl.argmax(sc, axis=0)
             upd = m > best
@@ -94,9 +97,12 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmi
         tl.store(sumdir_ptr + row * D + offs_d, sd + kn)
         tl.store(mmax_ptr + row, tl.maximum(tl.load(mmax_ptr + row), mag))
         tl.store(mmin_ptr + row, tl.minimum(tl.load(mmin_ptr + row), mag))
-        tl.store(cnt_ptr + row, tl.load(cnt_ptr + row) + 1.0)
+        cn = tl.load(cnt_ptr + row) + 1.0
+        tl.store(cnt_ptr + row, cn)
+        over = tl.maximum(over, ((cn > cap) & (n_act < C)).to(tl.int32))    # this cluster needs splitting
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
+    tl.store(oflag_ptr + h, over)
     tl.store(ksum_ptr + h * D + offs_d, ks)
     tl.store(end_ptr + h, new_end)
     nb = (new_end - 1).to(tl.float32)
@@ -108,29 +114,14 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmi
 
 
 @triton.jit
-def _pick_dev_kernel(scratch_ptr, cnt_ptr, w_ptr, s_wr, need_ptr, scale,
+def _pick_dev_kernel(scratch_ptr, cnt_ptr, nact_ptr, w_ptr, s_wr, need_ptr, scale,
                      G: tl.constexpr, G_PAD: tl.constexpr, C: tl.constexpr, BC: tl.constexpr):
     """Shared (`sum_share`) selection, as ``_pick_kernel``, with the budget read from GPU memory."""
     h = tl.program_id(0)
     c0 = tl.program_id(1) * BC
-    need = tl.load(need_ptr + h)
-    offs_g = tl.arange(0, G_PAD)
-    gm = offs_g < G
-    offs_c = tl.arange(0, C)
-    offs_i = c0 + tl.arange(0, BC)
-    cn = tl.load(cnt_ptr + h * C + offs_c)
-    live = cn > 0
-    e = tl.load(scratch_ptr + (h * G_PAD + offs_g)[:, None] * C + offs_c[None, :])
-    z = tl.where(gm[:, None], e * scale, 0.0)
-    zmax = tl.max(z, axis=1)
-    ex = tl.where(live[None, :], tl.exp(z - zmax[:, None]), 0.0)
-    inv = 1.0 / tl.sum(ex, axis=1)
-    sh = tl.sum(tl.where(gm[:, None], ex * inv[:, None], 0.0), axis=0)
-    sh = tl.where(live, sh, NEG_INF)
-    pick = offs_c[None, :] == offs_i[:, None]
-    si = tl.max(tl.where(pick, sh[None, :], NEG_INF), axis=1)
-    higher = tl.sum(tl.where(sh[None, :] > si[:, None], cn[None, :], 0.0), axis=1)
-    tl.store(w_ptr + h * s_wr + offs_i, ((higher < need) & (si > NEG_INF)).to(tl.float32))
+    n_act = tl.load(nact_ptr + h).to(tl.int32)
+    if c0 < n_act:
+        _shared_pick(scratch_ptr, cnt_ptr, w_ptr, s_wr, h, c0, n_act, tl.load(need_ptr + h), scale, G, G_PAD, C, BC)
 
 
 @triton.jit
@@ -211,14 +202,14 @@ class SphereIndexGraph(SphereIndexFused):
         H_kv, C, d = self.H_kv, self.C, self.d
         bc = self._bc()
         _bin_dev_kernel[(H_kv,)](
-            K, K.stride(0), K.stride(1), *self._dirs_arg(), self.sum_dir, self.mmax, self.mmin, self.count,
-            self.ksum, self.mu_ref, self.rbar, self.flags, self.labels, self.labels.stride(0),
-            self.end_dev, self.need_dev, n_dev, self.window, float(self.budget), float(self.delta),
+            K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
+            self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self.oflags, self.labels,
+            self.labels.stride(0), self.end_dev, self.need_dev, n_dev, self.window, float(self.budget), float(self.delta),
             C=C, D=d, BC=bc, num_warps=4)
         grid = (H_kv, C // bc)
-        _score_kernel[grid](q, q.stride(0), self.sum_dir, self.mmax, self.mmin, self.count, self.scratch,
+        _score_kernel[grid](q, q.stride(0), self.sum_dir, self.mmax, self.mmin, self.count, self.n_c, self.scratch,
                             G=self.G, G_PAD=self.G_PAD, C=C, D=d, BC=bc, num_warps=4)
-        _pick_dev_kernel[grid](self.scratch, self.count, self.wbuf, self.wbuf.stride(0), self.need_dev,
+        _pick_dev_kernel[grid](self.scratch, self.count, self.n_c, self.wbuf, self.wbuf.stride(0), self.need_dev,
                                1.0 / math.sqrt(d), G=self.G, G_PAD=self.G_PAD, C=C, BC=bc, num_warps=4)
         self.cnt.zero_()
         _compact_dev_kernel[(H_kv, triton.cdiv(self.capacity, self.compact_block))](
@@ -233,21 +224,14 @@ class SphereIndexGraph(SphereIndexFused):
             PER_HEAD=False, num_stages=3, num_warps=4)
         return _merge_into(b)
 
+    def _host_end(self) -> None:
+        self.end = int(self.end_dev[0])                                          # host sync, only when a flag was set
+
     def after_replay(self, K: torch.Tensor) -> None:
-        """Between replays: every ``check_every`` steps read the drift flags without a sync;
-        once a copy has landed, recenter the flagged heads (eager, in place)."""
+        """Between replays: every ``check_every`` steps read the per-head flags without a sync;
+        once a copy has landed, split the flagged heads' clusters that are over the cap and
+        recenter the heads whose mean has drifted (eager, in place)."""
         self.head_steps += self.H_kv
         self._steps += 1
-        if self._steps % self.check_every:
-            return
-        if self._pending is not None and self._pending.query():
-            heads = self._flags_host.nonzero().squeeze(1)
-            self._pending = None
-            if heads.numel():
-                self.end = int(self.end_dev[0])                                  # rare host sync
-                self._rebuild(K, heads.to(self.device))
-        if self._pending is None:
-            self._flags_host.copy_(self.flags, non_blocking=True)
-            self._pending = torch.cuda.Event()
-            self._pending.record()
-            self.flags.zero_()
+        if self._steps % self.check_every == 0:
+            self._check_flags(K)

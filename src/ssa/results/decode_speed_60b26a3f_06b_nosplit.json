@@ -1,0 +1,108 @@
+{
+ "git_sha": "60b26a3f1b5edb3e4363725906048299016f7178",
+ "torch_version": "2.12.1+cu130",
+ "cuda_version": "13.0",
+ "python_version": "3.12.13",
+ "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 5060 Ti",
+  "capability": [
+   12,
+   0
+  ],
+  "driver": "13.0"
+ },
+ "kind": "decode_speed",
+ "model": "Qwen/Qwen3-0.6B",
+ "batch": 1,
+ "steps": 256,
+ "warmup": 8,
+ "repeats": 3,
+ "prefill_chunk": 512,
+ "rows": [
+  {
+   "ms_per_token_median": 11.631711959838867,
+   "ms_min": 11.630952835083008,
+   "ms_max": 11.632506370544434,
+   "ms_all": [
+    11.630952968516794,
+    11.631711656264088,
+    11.63250639092439
+   ],
+   "gpu_ms": 9.53743999999997,
+   "attention_kernels_ms": 4.764790000000007,
+   "n": 16384,
+   "impl": "dense",
+   "cfg": {},
+   "batch": 1
+  },
+  {
+   "ms_per_token_median": 9.46400260925293,
+   "ms_min": 9.420971870422363,
+   "ms_max": 9.582256317138672,
+   "ms_all": [
+    9.42097202732839,
+    9.464002414460992,
+    9.582256246176257
+   ],
+   "tvd_vs_engine_dense": 0.014827985316514969,
+   "n": 16384,
+   "impl": "graph_dense",
+   "cfg": {},
+   "batch": 1,
+   "tokens_per_s": 105.66353807027723
+  },
+  {
+   "ms_per_token_median": 6.859023571014404,
+   "ms_min": 6.843756675720215,
+   "ms_max": 6.875030517578125,
+   "ms_all": [
+    6.859023371362127,
+    6.843756906164344,
+    6.875030456285458
+   ],
+   "tvd_vs_engine_dense": 0.05176771432161331,
+   "n": 16384,
+   "impl": "graph_cluster",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans",
+    "C_init": null,
+    "split_factor": 0.0,
+    "split_every": 4
+   },
+   "batch": 1,
+   "tokens_per_s": 145.79334647950577
+  },
+  {
+   "ms_per_token_median": 6.203359603881836,
+   "ms_min": 6.16008996963501,
+   "ms_max": 6.262855529785156,
+   "ms_all": [
+    6.262855390559707,
+    6.160090066259727,
+    6.203359434039157
+   ],
+   "tvd_vs_engine_dense": 0.09514261037111282,
+   "n": 16384,
+   "impl": "graph_cluster",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans",
+    "C_init": null,
+    "split_factor": 0.0,
+    "split_every": 4
+   },
+   "batch": 1,
+   "tokens_per_s": 161.2029712696708
+  }
+ ]
+}

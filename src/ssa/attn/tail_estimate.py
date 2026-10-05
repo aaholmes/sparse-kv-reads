@@ -38,8 +38,7 @@ class SphereIndexTail(SphereIndexGPU):
         super().__init__(**kw)
         self.t0_init = float(t0)
         self._V = None
-        self._rebuilt: set[int] = set()
-        self._fresh = False
+        self._tend = None                    # per head: positions below this are in the tail sums
 
     def _alloc(self, H_kv: int, d: int, dtype, device) -> None:
         super()._alloc(H_kv, d, dtype, device)
@@ -71,21 +70,37 @@ class SphereIndexTail(SphereIndexGPU):
         self.tq[heads] = 0
         self.tn[heads] = 0
         self._fold(K, self._V, heads, self.start, self.end, 1.0)
-        self._rebuilt.update(heads.tolist())
+        if self._tend is None or self._tend.shape[0] != self.H_kv:
+            self._tend = torch.zeros(self.H_kv, dtype=torch.long, device=self.device)
+        self._tend[heads] = self.end
 
-    def _init(self, K, n) -> None:
-        super()._init(K, n)
-        self._fresh = True
+    def _sync_tail(self, K) -> None:
+        """Add keys binned since the last call to the tail sums (before anything splits them)."""
+        for a in self._tend.unique().tolist():
+            if a < self.end:
+                heads = (self._tend == a).nonzero().flatten()
+                self._fold(K, self._V, heads, a, self.end, 1.0)
+        self._tend.fill_(self.end)
+
+    def _before_split(self, K) -> None:
+        self._sync_tail(K)
+
+    def _on_split(self, K, heads, pos, slot, rows) -> None:
+        """Recompute the tail sums of the clusters a split rewrote."""
+        m = (K[heads, pos].to(self.dtype) - self.mu_ref[heads]).norm(dim=-1)
+        e = torch.exp(self.t0[heads] * m)
+        flat = heads * self.C + slot
+        for t, v in ((self.tz, e), (self.tl, m * e), (self.tq, m * m * e)):
+            t.view(-1)[rows] = 0
+            t.view(-1).index_add_(0, flat, v)
+        self.tn.view(-1, self.d)[rows] = 0
+        self.tn.view(-1, self.d).index_add_(0, flat, e.unsqueeze(-1) * self._V[heads, pos].to(self.dtype))
 
     def observe(self, K: torch.Tensor, V: torch.Tensor, n: int) -> None:
         """Update from the cache ``K, V [H_kv, ≥n, d]`` holding ``n`` valid positions."""
-        self._V, self._rebuilt, self._fresh = V, set(), False
-        old_end = self.end
+        self._V = V
         super().observe(K, n)
-        if not self._fresh:
-            keep = [h for h in range(self.H_kv) if h not in self._rebuilt]
-            if keep:
-                self._fold(K, V, torch.tensor(keep, device=self.device), old_end, self.end, 1.0)
+        self._sync_tail(K)
 
     def set_t0(self, K: torch.Tensor, V: torch.Tensor, t0: torch.Tensor) -> None:
         """Change the reference ``t0 [H_kv]`` and recompute every head's sums."""
