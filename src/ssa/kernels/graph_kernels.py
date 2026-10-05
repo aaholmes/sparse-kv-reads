@@ -21,7 +21,7 @@ import triton
 import triton.language as tl
 
 from .labeled_attn import NEG, _list_kernel, _sm_count, merge_splits
-from .sphere_fused import NEG_INF, SphereIndexFused, _score_kernel, _shared_pick
+from .sphere_fused import NEG_INF, SphereIndexFused, _score_kernel, _shared_pick, _split_cluster
 
 
 @triton.jit
@@ -61,8 +61,8 @@ def _dense_dev_kernel(q_ptr, k_ptr, v_ptr, n_ptr, m_out, l_out, a_out, num_split
 
 @triton.jit
 def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                    rbar_ptr, flag_ptr, cap_ptr, oflag_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
-                    C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr):
+                    rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
+                    C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
     """Bin the keys that left the recent window since the last call; update this head's
     binned count, budget in keys and drift flag. All lengths read from GPU memory."""
     h = tl.program_id(0)
@@ -74,7 +74,6 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mma
     ks = tl.load(ksum_ptr + h * D + offs_d)
     n_act = tl.load(nact_ptr + h).to(tl.int32)             # clusters in use; later slots are spare
     cap = tl.load(cap_ptr + h)
-    over = tl.load(oflag_ptr + h)
     for p in range(old_end, new_end):
         k = tl.load(k_ptr + h * s_kh + p * s_kn + offs_d).to(tl.float32)
         ks += k
@@ -99,10 +98,13 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mma
         tl.store(mmin_ptr + row, tl.minimum(tl.load(mmin_ptr + row), mag))
         cn = tl.load(cnt_ptr + row) + 1.0
         tl.store(cnt_ptr + row, cn)
-        over = tl.maximum(over, ((cn > cap) & (n_act < C)).to(tl.int32))    # this cluster needs splitting
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-    tl.store(oflag_ptr + h, over)
+        if (cn > cap) & (n_act < C) & (cn >= 2.0) & (cn <= MS):            # over its cap: split it now
+            _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
+                           lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi, n_act, p + 1,
+                           C, D, MS, 1024, 64)
+            n_act += 1
     tl.store(ksum_ptr + h * D + offs_d, ks)
     tl.store(end_ptr + h, new_end)
     nb = (new_end - 1).to(tl.float32)
@@ -175,8 +177,10 @@ class DenseAttentionGraph:
 class SphereIndexGraph(SphereIndexFused):
     """``SphereIndexFused`` for graph capture: ``step`` issues only fixed-argument kernels."""
 
-    def __init__(self, *, budget: float, block_n: int = 32, compact_block: int = 1024, **kw):
+    def __init__(self, *, budget: float, block_n: int = 32, compact_block: int = 1024, refit_every: int = 0, **kw):
         super().__init__(**kw)
+        self.refit_every = refit_every          # refit the clusters to every binned key this often (0 = never)
+        self.refits = 0
         self.budget = budget
         self.block_n = block_n
         self.compact_block = compact_block
@@ -203,9 +207,9 @@ class SphereIndexGraph(SphereIndexFused):
         bc = self._bc()
         _bin_dev_kernel[(H_kv,)](
             K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
-            self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self.oflags, self.labels,
-            self.labels.stride(0), self.end_dev, self.need_dev, n_dev, self.window, float(self.budget), float(self.delta),
-            C=C, D=d, BC=bc, num_warps=4)
+            self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
+            self.labels, self.labels.stride(0), self.end_dev, self.need_dev, n_dev, self.window, float(self.budget),
+            float(self.delta), C=C, D=d, BC=bc, MS=self.MS, num_warps=4)
         grid = (H_kv, C // bc)
         _score_kernel[grid](q, q.stride(0), self.sum_dir, self.mmax, self.mmin, self.count, self.n_c, self.scratch,
                             G=self.G, G_PAD=self.G_PAD, C=C, D=d, BC=bc, num_warps=4)
@@ -228,10 +232,22 @@ class SphereIndexGraph(SphereIndexFused):
         self.end = int(self.end_dev[0])                                          # host sync, only when a flag was set
 
     def after_replay(self, K: torch.Tensor) -> None:
-        """Between replays: every ``check_every`` steps read the per-head flags without a sync;
-        once a copy has landed, split the flagged heads' clusters that are over the cap and
-        recenter the heads whose mean has drifted (eager, in place)."""
+        """Between replays: every ``check_every`` steps read the drift flags without a sync;
+        once a copy has landed, recenter the flagged heads (eager, in place)."""
         self.head_steps += self.H_kv
         self._steps += 1
-        if self._steps % self.check_every == 0:
+        if self.refit_every and self._steps % self.refit_every == 0:
+            self._refit(K)
+        elif self._steps % self.check_every == 0:
             self._check_flags(K)
+
+    def _refit(self, K: torch.Tensor) -> None:
+        """Fit the clusters again on every binned key, with a fresh mean (host work, eager)."""
+        self._host_end()
+        self.fitted.zero_()
+        self.n_c.fill_(self.C_init)
+        self._build(K, torch.arange(self.H_kv, device=self.device), None)
+        self._split_after_fit(K)
+        self.flags.zero_()
+        self._pending = None
+        self.refits += 1

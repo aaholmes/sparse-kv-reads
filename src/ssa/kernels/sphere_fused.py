@@ -34,16 +34,135 @@ POS_INF = tl.constexpr(float("inf"))
 
 
 @triton.jit
+def _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D: tl.constexpr, MS: tl.constexpr, BM: tl.constexpr):
+    """Members ``[j0, j0 + BM)`` of the cluster being split: unit directions, lengths, validity, positions."""
+    offs_m = j0 + tl.arange(0, BM)
+    vm = offs_m < m
+    pos = tl.load(mem_ptr + h * MS + offs_m, mask=vm, other=0)
+    k = tl.load(k_ptr + h * s_kh + pos[:, None] * s_kn + tl.arange(0, D)[None, :], mask=vm[:, None], other=0.0)
+    kr = k.to(tl.float32) - mu[None, :]
+    mag = tl.sqrt(tl.sum(kr * kr, axis=1))
+    return kr / tl.maximum(mag, 1e-12)[:, None], mag, vm, pos
+
+
+@triton.jit
+def _split_cluster(k_ptr, s_kh, s_kn, cent_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
+                   lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, c, new, stop,
+                   C: tl.constexpr, D: tl.constexpr, MS: tl.constexpr, BL: tl.constexpr, BM: tl.constexpr):
+    """Split cluster ``c`` of head ``h`` in two, the second half taking slot ``new``; the rule is
+    ``ssa.attn.sphere_gpu._bisect_padded``'s. Scans the head's labels ``[1, stop)`` for the
+    members, runs 2-means on their directions (from the first member and the one farthest from
+    it), cuts at the median projection on the line between the two centroids when a half would
+    hold under a quarter of the members, then rewrites both summaries, centroids and labels."""
+    offs_d = tl.arange(0, D)
+    offs_l = tl.arange(0, BL)
+    offs_b = tl.arange(0, BM)
+    m = c * 0
+    for b0 in range(1, stop, BL):                                         # member positions, in order
+        offs = b0 + offs_l
+        inb = offs < stop
+        hit = inb & (tl.load(lab_ptr + h * s_lh + offs, mask=inb, other=-1).to(tl.int32) == c)
+        hi = hit.to(tl.int32)
+        slot = tl.cumsum(hi, 0) - 1 + m
+        tl.store(mem_ptr + h * MS + slot, offs, mask=hit & (slot < MS))
+        m += tl.sum(hi, 0)
+    tl.debug_barrier()
+    m = tl.minimum(m, MS)
+    p0 = tl.load(mem_ptr + h * MS)
+    a = tl.load(k_ptr + h * s_kh + p0 * s_kn + offs_d).to(tl.float32) - mu
+    a = a / tl.maximum(tl.sqrt(tl.sum(a * a, axis=0)), 1e-12)
+    low = tl.sum(a * 0.0, axis=0) + 2.0
+    far = c * 0
+    for j0 in range(0, m, BM):                                            # the member farthest from the first
+        kn, mag, vm, pos = _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D, MS, BM)
+        sim = tl.where(vm, tl.sum(kn * a[None, :], axis=1), 2.0)
+        mn = tl.min(sim, axis=0)
+        upd = mn < low
+        far = tl.where(upd, tl.load(mem_ptr + h * MS + j0 + tl.argmin(sim, axis=0)), far)
+        low = tl.where(upd, mn, low)
+    b = tl.load(k_ptr + h * s_kh + far * s_kn + offs_d).to(tl.float32) - mu
+    b = b / tl.maximum(tl.sqrt(tl.sum(b * b, axis=0)), 1e-12)
+    mf = m.to(tl.float32)
+    for it in range(4):                                                   # 2-means on cosine similarity
+        s0 = tl.zeros([D], tl.float32)
+        s1 = tl.zeros([D], tl.float32)
+        n1 = mf * 0.0
+        for j0 in range(0, m, BM):
+            kn, mag, vm, pos = _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D, MS, BM)
+            one = vm & (tl.sum(kn * b[None, :], axis=1) > tl.sum(kn * a[None, :], axis=1))
+            s1 += tl.sum(tl.where(one[:, None], kn, 0.0), axis=0)
+            s0 += tl.sum(tl.where((vm & (one == 0))[:, None], kn, 0.0), axis=0)
+            n1 += tl.sum(one.to(tl.float32), axis=0)
+        a = tl.where(mf - n1 > 0, s0 / tl.maximum(tl.sqrt(tl.sum(s0 * s0, axis=0)), 1e-12), a)
+        b = tl.where(n1 > 0, s1 / tl.maximum(tl.sqrt(tl.sum(s1 * s1, axis=0)), 1e-12), b)
+    n1 = mf * 0.0
+    for j0 in range(0, m, BM):                                            # final sides and projections
+        kn, mag, vm, pos = _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D, MS, BM)
+        one = vm & (tl.sum(kn * b[None, :], axis=1) > tl.sum(kn * a[None, :], axis=1))
+        tl.store(side_ptr + h * MS + j0 + offs_b, one.to(tl.int32), mask=vm)
+        tl.store(proj_ptr + h * MS + j0 + offs_b, tl.sum(kn * (b - a)[None, :], axis=1), mask=vm)
+        n1 += tl.sum(one.to(tl.float32), axis=0)
+    tl.debug_barrier()
+    if (n1 < 0.25 * mf) | (n1 > 0.75 * mf):                               # lopsided: cut at the median projection
+        half = m // 2
+        for i0 in range(0, m, BM):
+            vi = (i0 + offs_b) < m
+            pi = tl.load(proj_ptr + h * MS + i0 + offs_b, mask=vi, other=0.0)
+            rank = tl.zeros([BM], tl.int32)
+            for j0 in range(0, m, BM):
+                vj = (j0 + offs_b) < m
+                pj = tl.load(proj_ptr + h * MS + j0 + offs_b, mask=vj, other=0.0)
+                less = (pj[None, :] < pi[:, None]) | ((pj[None, :] == pi[:, None])
+                                                      & ((j0 + offs_b)[None, :] < (i0 + offs_b)[:, None]))
+                rank += tl.sum((less & vj[None, :]).to(tl.int32), axis=1)
+            tl.store(side_ptr + h * MS + i0 + offs_b, (rank >= half).to(tl.int32), mask=vi)
+        tl.debug_barrier()
+    s0 = tl.zeros([D], tl.float32)
+    s1 = tl.zeros([D], tl.float32)
+    n1 = mf * 0.0
+    x0 = mf * 0.0
+    x1 = mf * 0.0
+    y0 = mf * 0.0 + POS_INF
+    y1 = mf * 0.0 + POS_INF
+    for j0 in range(0, m, BM):                                            # both halves' summaries; relabel one
+        kn, mag, vm, pos = _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D, MS, BM)
+        one = vm & (tl.load(side_ptr + h * MS + j0 + offs_b, mask=vm, other=0) > 0)
+        zero = vm & (one == 0)
+        s1 += tl.sum(tl.where(one[:, None], kn, 0.0), axis=0)
+        s0 += tl.sum(tl.where(zero[:, None], kn, 0.0), axis=0)
+        n1 += tl.sum(one.to(tl.float32), axis=0)
+        x1 = tl.maximum(x1, tl.max(tl.where(one, mag, 0.0), axis=0))
+        x0 = tl.maximum(x0, tl.max(tl.where(zero, mag, 0.0), axis=0))
+        y1 = tl.minimum(y1, tl.min(tl.where(one, mag, POS_INF), axis=0))
+        y0 = tl.minimum(y0, tl.min(tl.where(zero, mag, POS_INF), axis=0))
+        tl.store(lab_ptr + h * s_lh + pos, (pos * 0 + new).to(tl.int16), mask=one)
+    r0 = h * C + c
+    r1 = h * C + new
+    tl.store(sumdir_ptr + r0 * D + offs_d, s0)
+    tl.store(sumdir_ptr + r1 * D + offs_d, s1)
+    tl.store(mmax_ptr + r0, x0)
+    tl.store(mmax_ptr + r1, x1)
+    tl.store(mmin_ptr + r0, y0)
+    tl.store(mmin_ptr + r1, y1)
+    tl.store(cnt_ptr + r0, mf - n1)
+    tl.store(cnt_ptr + r1, n1)
+    tl.store(cent_ptr + h * s_dh + c * D + offs_d, s0 / tl.maximum(tl.sqrt(tl.sum(s0 * s0, axis=0)), 1e-12))
+    tl.store(cent_ptr + h * s_dh + new * D + offs_d, s1 / tl.maximum(tl.sqrt(tl.sum(s1 * s1, axis=0)), 1e-12))
+    tl.store(nact_ptr + h, (new + 1).to(tl.int64))
+    tl.store(nsplit_ptr + h, tl.load(nsplit_ptr + h) + 1)
+    tl.debug_barrier()
+
+
+@triton.jit
 def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                rbar_ptr, flag_ptr, cap_ptr, oflag_ptr, lab_ptr, s_lh, start, stop, nbinned, delta,
-                C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr):
+                rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, start, stop, nbinned,
+                delta, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
     h = tl.program_id(0)
     offs_d = tl.arange(0, D)
     mu = tl.load(mu_ptr + h * D + offs_d)
     ks = tl.load(ksum_ptr + h * D + offs_d)
     n_act = tl.load(nact_ptr + h).to(tl.int32)             # clusters in use; later slots are spare
     cap = tl.load(cap_ptr + h)
-    over = tl.load(oflag_ptr + h)
     for p in range(start, stop):
         k = tl.load(k_ptr + h * s_kh + p * s_kn + offs_d).to(tl.float32)
         ks += k
@@ -68,10 +187,13 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_pt
         tl.store(mmin_ptr + row, tl.minimum(tl.load(mmin_ptr + row), mag))
         cn = tl.load(cnt_ptr + row) + 1.0
         tl.store(cnt_ptr + row, cn)
-        over = tl.maximum(over, ((cn > cap) & (n_act < C)).to(tl.int32))    # this cluster needs splitting
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-    tl.store(oflag_ptr + h, over)
+        if (cn > cap) & (n_act < C) & (cn >= 2.0) & (cn <= MS):            # over its cap: split it now
+            _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
+                           lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi, n_act, p + 1,
+                           C, D, MS, 1024, 64)
+            n_act += 1
     tl.store(ksum_ptr + h * D + offs_d, ks)
     mu_t = ks / nbinned
     dist = tl.sqrt(tl.sum((mu_t - mu) * (mu_t - mu), axis=0))
@@ -170,22 +292,32 @@ class SphereIndexFused(SphereIndexGPU):
     (BF16 or FP32 keys) on CUDA. ``labels_and_weights`` returns persistent buffers that the
     next call overwrites.
 
-    ``async_check=True`` (default) reads the per-head flags (mean has drifted; a cluster has
-    grown past its cap) without a host synchronization: every ``check_every`` steps the flags are
-    copied to pinned host memory, and the copy is acted on at a later check once it has landed.
-    Recentering and splitting therefore lag by at least one check period; attention stays exact
-    over the rows read whatever the lag. A caller that never waits for the GPU (a timing loop fed
+    ``async_check=True`` (default) reads the drift flags without a host synchronization:
+    every ``check_every`` steps the flags are copied to pinned host memory, and the copy is
+    acted on at a later check once it has landed. Recentering therefore lags by at least one
+    check period; attention stays exact over the rows read whatever the lag. A caller that never waits for the GPU (a timing loop fed
     known tokens) can queue many steps ahead of it, so a copy still outstanding after ``max_lag``
     further checks is waited for; a caller that reads each token before the next step never waits.
-    Flagged heads are split every ``split_every`` checks, all their clusters over the cap together,
-    since a split pass costs about a millisecond of small PyTorch operations however few it splits."""
 
-    def __init__(self, *args, async_check: bool = True, max_lag: int = 2, split_every: int = 4, **kw):
+    Splitting during decoding happens inside the binning kernel: the program that inserts a key
+    into a cluster and takes it past its cap splits that cluster before the step's selection, with
+    no host work. A cluster of more than ``split_scratch`` keys is left alone."""
+
+    def __init__(self, *args, async_check: bool = True, max_lag: int = 2, split_scratch: int = 8192, **kw):
+        self._splits_host = 0
+        self.nsplit = None
         super().__init__(*args, **kw)
-        self.async_check, self.max_lag, self.split_every = async_check, max_lag, split_every
+        self.async_check, self.max_lag, self.split_scratch = async_check, max_lag, split_scratch
         self._waited = 0
-        self._checks = 0
-        self._over_heads = None                 # heads flagged for a split since the last split pass
+
+    @property
+    def splits(self) -> int:
+        """Clusters created by splitting (reads a GPU counter)."""
+        return self._splits_host + (int(self.nsplit.sum()) if self.nsplit is not None else 0)
+
+    @splits.setter
+    def splits(self, v: int) -> None:
+        self._splits_host = v - (int(self.nsplit.sum()) if self.nsplit is not None else 0)
 
     def _bc(self) -> int:
         """Bin chunk per program: 64, or C if smaller. C must be a power of two ≥ 16."""
@@ -195,8 +327,13 @@ class SphereIndexFused(SphereIndexGPU):
     def _alloc(self, H_kv, d, dtype, device):
         super()._alloc(H_kv, d, torch.float32, device)
         self.flags = torch.zeros(H_kv, dtype=torch.int32, device=device)
-        self.oflags = torch.zeros(H_kv, dtype=torch.int32, device=device)   # a cluster of this head is over its cap
-        self._flags_host = torch.zeros(2, H_kv, dtype=torch.int32, pin_memory=True)
+        self._flags_host = torch.zeros(H_kv, dtype=torch.int32, pin_memory=True)
+        ms = min(self.split_scratch, self.capacity)                         # scratch for the in-kernel split
+        self.MS = ms
+        self._mem = torch.zeros(H_kv, ms, dtype=torch.int32, device=device)
+        self._proj = torch.zeros(H_kv, ms, dtype=torch.float32, device=device)
+        self._side = torch.zeros(H_kv, ms, dtype=torch.int32, device=device)
+        self.nsplit = torch.zeros(H_kv, dtype=torch.int32, device=device)
         self._pending = None
         self._w = {}
         self._scratch = None
@@ -214,9 +351,9 @@ class SphereIndexFused(SphereIndexGPU):
         if new_end > self.end:
             _bin_kernel[(self.H_kv,)](
                 K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
-                self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self.oflags, self.labels,
-                self.labels.stride(0), self.end, new_end, float(new_end - 1), float(self.delta),
-                C=self.C, D=self.d, BC=self._bc(), num_warps=4)
+                self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
+                self.labels, self.labels.stride(0), self.end, new_end, float(new_end - 1), float(self.delta),
+                C=self.C, D=self.d, BC=self._bc(), MS=self.MS, num_warps=4)
             self.end = new_end
         self.head_steps += self.H_kv
         if self.end - 1 <= 0:
@@ -229,42 +366,25 @@ class SphereIndexFused(SphereIndexGPU):
     def _host_end(self) -> None:
         """Bring ``self.end`` up to date before host-side work (kept on the GPU by subclasses)."""
 
-    def _split_flagged(self, K, heads) -> None:
-        if heads.numel():
-            self._host_end()
-            cand = torch.zeros(self.H_kv, self.C, dtype=torch.bool, device=self.device)
-            cand[heads] = True
-            self._split_overflow(K, cand)
-
     def _check_flags(self, K) -> None:
         if not self.async_check:
-            self._split_flagged(K, self.oflags.nonzero().squeeze(1))       # host sync
-            self._rebuild(K, self.flags.nonzero().squeeze(1))
+            self._rebuild(K, self.flags.nonzero().squeeze(1))              # host sync
             self.flags.zero_()
-            self.oflags.zero_()
             return
         if self._pending is not None:
             self._waited += 1
             if self._waited > self.max_lag and not self._pending.query():  # the host has run far ahead of the GPU
                 self._pending.synchronize()
         if self._pending is not None and self._pending.query():            # earlier copy has landed
-            drift = self._flags_host[0].nonzero().squeeze(1)
-            self._over_heads = self._flags_host[1].clone() if self._over_heads is None \
-                else self._over_heads | self._flags_host[1]
+            heads = self._flags_host.nonzero().squeeze(1)
             self._pending = None
-            self._rebuild(K, drift.to(self.device))
-        self._checks += 1
-        if self._checks % self.split_every == 0 and self._over_heads is not None:
-            self._split_flagged(K, self._over_heads.nonzero().squeeze(1).to(self.device))
-            self._over_heads = None
+            self._rebuild(K, heads.to(self.device))
         if self._pending is None:
-            self._flags_host[0].copy_(self.flags, non_blocking=True)
-            self._flags_host[1].copy_(self.oflags, non_blocking=True)
+            self._flags_host.copy_(self.flags, non_blocking=True)
             self._pending = torch.cuda.Event()
             self._pending.record()
             self._waited = 0
             self.flags.zero_()
-            self.oflags.zero_()
 
     def _rebuild(self, K, heads):
         if heads.numel():
