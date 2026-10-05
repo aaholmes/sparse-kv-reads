@@ -1,0 +1,180 @@
+{
+ "git_sha": "39f45d3f84e30fedfbcf8098bfe657d29c0fc20b",
+ "torch_version": "2.12.1+cu130",
+ "cuda_version": "13.0",
+ "python_version": "3.12.13",
+ "platform": "Linux-6.8.0-139-generic-x86_64-with-glibc2.39",
+ "gpu": {
+  "name": "NVIDIA GeForce RTX 5060 Ti",
+  "capability": [
+   12,
+   0
+  ],
+  "driver": "13.0"
+ },
+ "kind": "decode_speed",
+ "model": "Qwen/Qwen3-0.6B",
+ "batch": 1,
+ "steps": 64,
+ "warmup": 8,
+ "repeats": 3,
+ "prefill_chunk": 512,
+ "rows": [
+  {
+   "ms_per_token_median": 11.640313148498535,
+   "ms_min": 11.63999080657959,
+   "ms_max": 11.640545845031738,
+   "ms_all": [
+    11.640545482805464,
+    11.640312688541599,
+    11.639990498224506
+   ],
+   "gpu_ms": 9.52680199999997,
+   "attention_kernels_ms": 4.748984000000003,
+   "n": 16384,
+   "impl": "dense",
+   "cfg": {},
+   "batch": 1
+  },
+  {
+   "ms_per_token_median": 9.442785263061523,
+   "ms_min": 9.3831205368042,
+   "ms_max": 9.606294631958008,
+   "ms_all": [
+    9.606294799596071,
+    9.38312073412817,
+    9.442785110877594
+   ],
+   "tvd_vs_engine_dense": 0.010857801884412766,
+   "n": 16384,
+   "impl": "graph_dense",
+   "cfg": {},
+   "batch": 1,
+   "tokens_per_s": 105.90095741262063
+  },
+  {
+   "ms_per_token_median": 6.636117458343506,
+   "ms_min": 6.587608814239502,
+   "ms_max": 6.640481472015381,
+   "ms_all": [
+    6.636117654124973,
+    6.640481671638554,
+    6.5876086555363145
+   ],
+   "tvd_vs_engine_dense": 0.03238578140735626,
+   "n": 16384,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans"
+   },
+   "batch": 1,
+   "tokens_per_s": 150.69052141967632
+  },
+  {
+   "ms_per_token_median": 6.000833511352539,
+   "ms_min": 5.93360710144043,
+   "ms_max": 6.008227348327637,
+   "ms_all": [
+    6.000833545840578,
+    6.008227548591094,
+    5.933606920734746
+   ],
+   "tvd_vs_engine_dense": 0.07709255814552307,
+   "n": 16384,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans"
+   },
+   "batch": 1,
+   "tokens_per_s": 166.64351678948816
+  },
+  {
+   "ms_per_token_median": 16.443511962890625,
+   "ms_min": 16.44293212890625,
+   "ms_max": 16.44510841369629,
+   "ms_all": [
+    16.442931391793536,
+    16.445107467006892,
+    16.443511107354425
+   ],
+   "gpu_ms": 14.028110000000014,
+   "attention_kernels_ms": 9.245139999999992,
+   "n": 32768,
+   "impl": "dense",
+   "cfg": {},
+   "batch": 1
+  },
+  {
+   "ms_per_token_median": 14.199440002441406,
+   "ms_min": 14.08607006072998,
+   "ms_max": 14.30562686920166,
+   "ms_all": [
+    14.199439763615374,
+    14.086069702898385,
+    14.305626486020628
+   ],
+   "tvd_vs_engine_dense": 0.01796816475689411,
+   "n": 32768,
+   "impl": "graph_dense",
+   "cfg": {},
+   "batch": 1,
+   "tokens_per_s": 70.42531253542839
+  },
+  {
+   "ms_per_token_median": 7.706893444061279,
+   "ms_min": 7.609630584716797,
+   "ms_max": 7.747938632965088,
+   "ms_all": [
+    7.6096307348052505,
+    7.747938845568569,
+    7.706893498834688
+   ],
+   "tvd_vs_engine_dense": 0.03145216405391693,
+   "n": 32768,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.2,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans"
+   },
+   "batch": 1,
+   "tokens_per_s": 129.75396730969112
+  },
+  {
+   "ms_per_token_median": 6.368949890136719,
+   "ms_min": 6.209949970245361,
+   "ms_max": 6.39111852645874,
+   "ms_all": [
+    6.20994978089584,
+    6.391118513420224,
+    6.368949841998983
+   ],
+   "tvd_vs_engine_dense": 0.08771269023418427,
+   "n": 32768,
+   "impl": "graph_voronoi",
+   "cfg": {
+    "budget": 0.05,
+    "C": 256,
+    "window": 64,
+    "delta": 0.03,
+    "check_every": 16,
+    "partition": "kmeans"
+   },
+   "batch": 1,
+   "tokens_per_s": 157.0117550380874
+  }
+ ]
+}

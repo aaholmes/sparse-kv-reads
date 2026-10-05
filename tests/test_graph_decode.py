@@ -11,7 +11,7 @@ pytestmark = pytest.mark.requires_cuda
 
 CFG = TinyCfg(head_dim=16, max_position_embeddings=512, num_attention_heads=4, num_key_value_heads=2)
 P, T = 200, 30
-SPHERE = dict(budget=0.3, C=16, window=4, delta=float("inf"), check_every=4)
+SPHERE = dict(budget=0.3, C=16, window=4, delta=float("inf"), check_every=4, partition="random")
 
 
 def _setup(seed=0):

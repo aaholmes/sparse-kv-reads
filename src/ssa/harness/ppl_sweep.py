@@ -122,20 +122,20 @@ SPHERE_V1_CONDITIONS = (
 SPHERE_FUSED_CONDITIONS = (
     [("dense", {})]
     + [("voronoi_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
-                         "check_every": 16}) for b in (0.1, 0.2)]
+                         "check_every": 16, "partition": "random"}) for b in (0.1, 0.2)]
 )
 
 # Fused kernels at three budgets with systematic-sampling references (for other models / contexts).
 SPHERE_FUSED_REFS_CONDITIONS = (
     [("dense", {})]
     + [("voronoi_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
-                         "check_every": 16}) for b in (0.05, 0.1, 0.2)]
+                         "check_every": 16, "partition": "random"}) for b in (0.05, 0.1, 0.2)]
     + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
 )
 
 def _fused(b, C=256):
     return ("voronoi_fused", {"budget": b, "C": C, "window": 64, "delta": 0.03, "group": "sum_share",
-                             "check_every": 16})
+                             "check_every": 16, "partition": "random"})
 
 
 # Top-k-style selection, thorough checks.
@@ -146,7 +146,7 @@ FUSED_C_SCAN_CONDITIONS = [("dense", {})] + [_fused(b, C) for C in (128, 512) fo
 
 def _sample(h, S, a, C=256):
     return ("voronoi_sample", {"budget": h, "S": S, "alpha": a, "C": C, "window": 64, "delta": 0.03,
-                              "check_every": 16})
+                              "check_every": 16, "partition": "random"})
 
 
 # Sampling the unselected bins: grid at 8k, focused set at 32k; top-k 15% for matched reads.
@@ -155,7 +155,7 @@ SAMPLE_GRID_CONDITIONS = ([("dense", {}), _fused(0.15)]
 SAMPLE_FOCUS_CONDITIONS = [("dense", {})] + [_sample(h, S, 0.5) for h in (0.1, 0.2) for S in (8, 32)]
 def _tail(b, order=1, C=256):
     return ("voronoi_tail", {"budget": b, "order": order, "C": C, "window": 64, "delta": 0.03,
-                            "group": "sum_share", "check_every": 16})
+                            "group": "sum_share", "check_every": 16, "partition": "random"})
 
 
 # Estimating the dropped bins from per-bin sums; dropping with the same bins as a matched control.
@@ -175,6 +175,9 @@ QUEST_VS_VORONOI_CONDITIONS = (
 KMEANS_VS_RANDOM_CONDITIONS = [("dense", {})] + [
     (i, {**c, "partition": part}) for part in ("kmeans", "random")
     for i, c in (_tail(b, "drop") for b in (0.05, 0.1, 0.2, 0.4))]
+# Fitted centroids in the fused Triton kernels (compare with the PyTorch index in kmeans_vs_random).
+FUSED_KMEANS_CONDITIONS = [("dense", {})] + [(i, {**c, "partition": "kmeans"})
+                                             for i, c in (_fused(b) for b in (0.05, 0.1, 0.2, 0.4))]
 # Reference: weight-only quantization of the same model, compared with BF16 on the same chunks.
 QUANT8_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 8})]
 QUANT4_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 4, "group_size": 128})]
@@ -191,7 +194,7 @@ CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
                      "fused_C_scan": FUSED_C_SCAN_CONDITIONS, "sample_grid": SAMPLE_GRID_CONDITIONS,
                      "sample_focus": SAMPLE_FOCUS_CONDITIONS, "quant8": QUANT8_CONDITIONS,
                      "quant4": QUANT4_CONDITIONS, "tail": TAIL_CONDITIONS,
-                     "tail_conv": TAIL_CONV_CONDITIONS, "kmeans_vs_random": KMEANS_VS_RANDOM_CONDITIONS, "quest_vs_voronoi": QUEST_VS_VORONOI_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
+                     "tail_conv": TAIL_CONV_CONDITIONS, "fused_kmeans": FUSED_KMEANS_CONDITIONS, "kmeans_vs_random": KMEANS_VS_RANDOM_CONDITIONS, "quest_vs_voronoi": QUEST_VS_VORONOI_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
 
 
 def _total_budget(impl: str, cfg: dict) -> int | None:

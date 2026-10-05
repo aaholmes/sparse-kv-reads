@@ -95,9 +95,9 @@ def _boot_mean(a: list[int], reps: int = 4000, seed: int = 0) -> list[float]:
 
 CONDITIONS = [("exact", None, {}),
               ("voronoi_20", "voronoi_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03,
-                                               "group": "sum_share", "check_every": 16}),
+                                               "group": "sum_share", "check_every": 16, "partition": "kmeans"}),
               ("voronoi_05", "voronoi_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03,
-                                               "group": "sum_share", "check_every": 16})]
+                                               "group": "sum_share", "check_every": 16, "partition": "kmeans"})]
 
 
 def main() -> None:

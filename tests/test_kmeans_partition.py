@@ -54,13 +54,6 @@ def test_random_partition_is_unchanged_by_default():
     assert torch.equal(a.labels, b.labels)
 
 
-@pytest.mark.requires_cuda
-def test_fused_kernels_reject_fitted_centroids_for_now():
-    from ssa.kernels.sphere_fused import SphereIndexFused
-    with pytest.raises(NotImplementedError):
-        SphereIndexFused(C=C, window=W, capacity=500, partition="kmeans")
-
-
 def test_engine_op_with_fitted_centroids_is_exact_at_full_budget():
     cfg = TinyCfg(head_dim=16, max_position_embeddings=256, num_attention_heads=4, num_key_value_heads=2)
     model = tiny_model(cfg).eval()
@@ -77,3 +70,21 @@ def test_engine_op_with_fitted_centroids_is_exact_at_full_budget():
     got = decode()
     uninstall(model)
     torch.testing.assert_close(got, ref, rtol=1e-3, atol=1e-3)
+
+
+def test_fitted_centroids_are_the_default_for_the_engine_ops_and_graph_decoder():
+    import inspect
+    from ssa.models.graph_decode import GraphDecoder
+    from ssa.models import patch
+    assert inspect.signature(GraphDecoder.__init__).parameters["partition"].default == "kmeans"
+    src = inspect.getsource(patch.make_decode_op)
+    assert src.count('cfg.get("partition", "kmeans")') == 2 and 'cfg.get("partition", "random")' not in src
+
+
+def test_older_sweep_presets_pin_random_directions():
+    from ssa.harness.ppl_sweep import CONDITION_PRESETS
+    for name in ("fused_hi", "sphere_fused_refs", "sample_grid", "tail", "tail_conv"):
+        for impl, cfg in CONDITION_PRESETS[name]:
+            if impl in ("voronoi_fused", "voronoi_tail", "voronoi_sample"):
+                assert cfg.get("partition") == "random", (name, impl)
+    assert all(c.get("partition") == "kmeans" for i, c in CONDITION_PRESETS["fused_kmeans"] if i != "dense")

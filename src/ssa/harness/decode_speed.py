@@ -154,6 +154,8 @@ def main() -> None:
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--tag", default="")
     p.add_argument("--batch", type=int, default=1, help="sequences decoded together (equal lengths)")
+    p.add_argument("--partition", default="kmeans", choices=["random", "kmeans"],
+                   help="region directions for the voronoi graph conditions")
     p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and voronoi)")
     p.add_argument("--flashinfer", action="store_true",
                    help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
@@ -178,6 +180,8 @@ def main() -> None:
         if args.graph:
             ref = dense_logits(model, ids, cache, n, warmup=args.warmup, steps=args.steps)
             for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
+                if mode == "voronoi":
+                    cfg = {**cfg, "partition": args.partition}
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)
                 r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg, "batch": args.batch,

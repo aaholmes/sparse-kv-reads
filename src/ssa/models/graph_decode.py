@@ -28,7 +28,7 @@ from ..kernels.graph_kernels import DenseAttentionGraph, SphereIndexGraph
 
 class GraphDecoder:
     def __init__(self, model, cache, *, mode: str = "dense", budget: float = 0.2, C: int = 256,
-                 window: int = 64, delta: float = 0.03, check_every: int = 16, **_):
+                 window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", **_):
         cfg = model.cfg
         self.model, self.cache, self.mode = model, cache, mode
         self.H, self.H_kv, self.d = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
@@ -51,7 +51,7 @@ class GraphDecoder:
             self.attn = None
         elif mode == "voronoi":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
-                                          check_every=check_every) for _ in model.layers]
+                                          check_every=check_every, partition=partition) for _ in model.layers]
         else:
             raise ValueError(f"unknown mode {mode!r}")
         self.graph = None

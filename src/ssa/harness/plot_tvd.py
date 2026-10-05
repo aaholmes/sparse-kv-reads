@@ -17,16 +17,21 @@ from pathlib import Path
 
 from ..attn import canonical
 
-LABELS = {"voronoi_skip": "voronoi_skip", "voronoi_tail": "voronoi_skip + tail estimate",
-          "santa_sys": "systematic sampling"}
+LABELS = {"fitted": "this method", "voronoi_skip": "fixed random directions",
+          "voronoi_tail": "fixed random directions + tail estimate", "santa_sys": "systematic sampling"}
 
 
-def build_series(paths, regions: int = 256) -> dict[str, dict[str, list[float]]]:
-    """Collect (reads %, TVD, CI) per method, sorted by reads."""
+def build_series(paths, regions: int = 256, only=None) -> dict[str, dict[str, list[float]]]:
+    """Collect (reads %, TVD, CI) per method, sorted by reads. ``fitted`` is the fused kernels with
+    fitted (k-means) centroids; ``only`` keeps the named series."""
     rows: dict[str, list[tuple[float, float, float, float]]] = {k: [] for k in LABELS}
     for p in paths:
         for r in json.loads(Path(p).read_text())["summary"]:
             impl = canonical(r["impl"])
+            if impl == "voronoi_fused":
+                if r["cfg"].get("partition") != "kmeans" or r["cfg"].get("C") != regions:
+                    continue
+                impl = "fitted"
             if impl not in rows or "tvd_ci" not in r:
                 continue
             if impl in ("voronoi_skip", "voronoi_tail") and r["cfg"].get("C") != regions:
@@ -37,6 +42,8 @@ def build_series(paths, regions: int = 256) -> dict[str, dict[str, list[float]]]
             rows[impl].append((round(100 * r["kv_read_fraction"], 1), r["tvd"], lo, hi))
     out = {}
     for impl, pts in rows.items():
+        if only is not None and impl not in only:
+            continue
         pts.sort()
         out[impl] = {
             "x": [p[0] for p in pts],
@@ -55,7 +62,7 @@ def plot_series(series, out) -> None:
 
     plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
     fig, ax = plt.subplots(figsize=(4.4, 3.3), dpi=200)
-    style = {"voronoi_skip": ("#1f5fbf", "o", "-"), "voronoi_tail": ("#2a9d8f", "^", "--"),
+    style = {"fitted": ("#1f5fbf", "o", "-"), "voronoi_skip": ("#7f8c8d", "D", "-"), "voronoi_tail": ("#2a9d8f", "^", "--"),
              "santa_sys": ("#c0392b", "s", "none")}
     for impl, s in series.items():
         if not s["x"]:
@@ -69,7 +76,7 @@ def plot_series(series, out) -> None:
     ax.set_xlim(0, None)
     ax.set_ylim(0, None)
     ax.grid(axis="y", alpha=0.2)
-    ax.legend(frameon=False, loc="upper right", fontsize=9 if series.get("voronoi_tail", {}).get("x") else None)
+    ax.legend(frameon=False, loc="lower left" if series.get("fitted", {}).get("x") else "upper right", fontsize=9 if series.get("voronoi_tail", {}).get("x") else None)
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -80,8 +87,9 @@ def main() -> None:
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--regions", type=int, default=256)
     ap.add_argument("--out", default="tvd.png")
+    ap.add_argument("--only", nargs="+", default=None, help="series to draw (fitted, voronoi_skip, voronoi_tail, santa_sys)")
     args = ap.parse_args()
-    plot_series(build_series(args.paths, args.regions), args.out)
+    plot_series(build_series(args.paths, args.regions, args.only), args.out)
 
 
 if __name__ == "__main__":

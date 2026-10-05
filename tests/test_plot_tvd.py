@@ -70,3 +70,21 @@ def test_tail_estimate_is_its_own_series_and_the_drop_control_is_left_out(tmp_pa
     out = tmp_path / "tvd.png"
     plot_series(s, out)
     assert out.exists()
+
+
+def test_fitted_cluster_results_form_their_own_series_named_without_voronoi(tmp_path):
+    from ssa.harness.plot_tvd import LABELS
+    a = tmp_path / "a.json"
+    a.write_text(json.dumps(_payload([
+        _row("voronoi_fused", {"budget": 0.1, "C": 256, "partition": "kmeans"}, 0.126, 0.046, 0.038, 0.055),
+        _row("voronoi_fused", {"budget": 0.1, "C": 256, "partition": "random"}, 0.131, 0.063, 0.053, 0.073),
+        _row("sphere_skip", {"budget": 0.1, "C": 256}, 0.13, 0.063, 0.053, 0.074),
+        _row("santa_sys", {"S": 64}, 0.50, 0.058, 0.049, 0.065),
+    ])))
+    s = build_series([a], regions=256, only=("fitted", "santa_sys"))
+    assert s["fitted"]["x"] == [12.6] and s["fitted"]["y"] == [0.046]
+    assert set(s) == {"fitted", "santa_sys"}                         # the random-direction rows are left out
+    assert "voronoi" not in LABELS["fitted"].lower()
+    out = tmp_path / "tvd.png"
+    plot_series(s, out)
+    assert out.exists()

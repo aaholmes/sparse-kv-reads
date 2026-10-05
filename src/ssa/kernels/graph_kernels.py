@@ -60,7 +60,7 @@ def _dense_dev_kernel(q_ptr, k_ptr, v_ptr, n_ptr, m_out, l_out, a_out, num_split
 
 
 @triton.jit
-def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
+def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
                     rbar_ptr, flag_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
                     C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr):
     """Bin the keys that left the recent window since the last call; update this head's
@@ -82,7 +82,7 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, sumdir_ptr, mmax_ptr, mmin_ptr,
         bi = 0
         for c0 in tl.static_range(0, C, BC):
             offs_c = c0 + tl.arange(0, BC)
-            dv = tl.load(dirs_ptr + offs_c[:, None] * D + offs_d[None, :])
+            dv = tl.load(dirs_ptr + h * s_dh + offs_c[:, None] * D + offs_d[None, :])
             sc = tl.sum(dv * kn[None, :], axis=1)
             m = tl.max(sc, axis=0)
             am = tl.argmax(sc, axis=0)
@@ -211,7 +211,7 @@ class SphereIndexGraph(SphereIndexFused):
         H_kv, C, d = self.H_kv, self.C, self.d
         bc = self._bc()
         _bin_dev_kernel[(H_kv,)](
-            K, K.stride(0), K.stride(1), self.dirs, self.sum_dir, self.mmax, self.mmin, self.count,
+            K, K.stride(0), K.stride(1), *self._dirs_arg(), self.sum_dir, self.mmax, self.mmin, self.count,
             self.ksum, self.mu_ref, self.rbar, self.flags, self.labels, self.labels.stride(0),
             self.end_dev, self.need_dev, n_dev, self.window, float(self.budget), float(self.delta),
             C=C, D=d, BC=bc, num_warps=4)

@@ -26,12 +26,13 @@ import torch
 
 def spherical_kmeans(X: torch.Tensor, *, C: int, iters: int = 10, seed: int = 0):
     """k-means on cosine similarity, batched over heads: ``X [h, m, d]`` -> ``assign [h, m]``,
-    unit ``centroids [h, C, d]``. Starts from ``C`` distinct points chosen at random per head;
+    unit ``centroids [h, C, d]``. Starts from the points at ``C`` random positions, the same positions for every head (so a head's
+    result does not depend on where it sits in a batch);
     an empty cluster keeps its previous centroid."""
     h, m, d = X.shape
     Xn = torch.nn.functional.normalize(X, dim=-1)
     g = torch.Generator(device="cpu").manual_seed(seed)
-    init = torch.stack([torch.randperm(m, generator=g)[torch.arange(C) % m] for _ in range(h)]).to(X.device)
+    init = torch.randperm(m, generator=g)[torch.arange(C) % m].expand(h, C).to(X.device)   # same for every head
     cent = torch.gather(Xn, 1, init.unsqueeze(-1).expand(h, C, d)).clone()
     assign = None
     for _ in range(iters):

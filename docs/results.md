@@ -2,6 +2,8 @@
 
 Supporting detail for the [README](../README.md). Unless stated otherwise, results are for Qwen3-4B in bf16 on WikiText-103, with 8 text chunks per setting (2,040 scored decode steps). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's; reads are key and value (K+V) rows, including region summaries; brackets are 95% bootstrap confidence intervals over chunks. Timings are on one RTX 5060 Ti GPU (16 GB, 448 GB/s).
 
+**Fixed directions and fitted clusters.** The method first grouped keys by the nearest of 256 fixed random directions (`partition="random"`, called `voronoi_skip` in this file and in older result files); since October 2026 it groups them by centroids fitted with k-means at the end of the prompt (`partition="kmeans"`, the default). Every section below was measured with fixed directions unless it says otherwise. [Fitted clusters](#fitted-clusters) gives the results with the current method.
+
 ## Fidelity compared with systematic sampling
 
 | context | method | K+V rows read | TVD from exact |
@@ -142,4 +144,37 @@ End to end (`accept_sweep --preset quest_vs_voronoi`, both methods in PyTorch in
 `quest_matched` cannot read less than 17%; `voronoi_skip` reaches 8% (TVD 0.084).
 
 Offline, per layer (`ssa.harness.quest_replay`, 8 WikiText contexts at 8k, single-layer attention-output error; `src/ssa/results/quest_replay_0a8e6747.json`), the comparison goes both ways: `quest_matched` has 1.3–1.9× our error at layer 12 at 10–30% reads, 0.27–0.88× at layer 24, and crosses over at layer 35 (1.58× at 10%, 0.74× at 30%). `quest_plain`, which pages every token and lets each query head choose its own pages, has 8–127× our error at 15–30% reads: heads that attend mostly to recent tokens lose them, because the bound over 128 dimensions is too loose to rank those pages near the top. The Quest paper keeps the first two layers dense and does not state whether recent tokens are always read or whether selection is per head; these runs apply sparsity to every layer for both methods.
+
+## Fitted clusters
+
+**What matters: partition, centering or score** (`ssa.harness.partition_ablation`, `src/ssa/results/partition_ablation_e26ca205.json`). On the 8 WikiText captures at 8,192 tokens, all eight combinations of partition (fixed random directions or cosine k-means), centering (mean-centered or raw keys) and score (key length × projection on the cluster's mean direction, or the projection alone) were run with the same always-read tokens, shared selection and 256 clusters. Single-layer attention-output error at matched K+V reads, divided by the fixed-direction method's (ranges over 10–30% reads; layer 0 at 30% only):
+
+| combination | layer 0 | layer 12 | layer 24 | layer 35 |
+|---|---|---|---|---|
+| random / centered / length (fixed directions) | 1 | 1 | 1 | 1 |
+| random / centered / projection | 1.02 | 1.01–1.08 | 0.97–1.01 | 0.96–1.01 |
+| random / raw / length | — | 2.1–2.8 | 1.1–1.4 | 2.0–2.4 |
+| k-means / centered / length (current method) | 0.16 | 0.42–0.52 | 0.55–0.62 | 0.28–0.46 |
+| k-means / centered / projection | 0.41 | 0.52–0.63 | 0.58–0.63 | 0.31–0.51 |
+| k-means / raw / length | 0.15 | 0.44–0.53 | 0.58–0.66 | 0.31–0.44 |
+| k-means / raw / projection (ClusterKV-style scoring) | 0.16 | 0.54–0.62 | 0.59–0.62 | 0.34–0.49 |
+
+The partition is what matters; the score changes little, and centering matters only with fixed directions. Tests check that the first row reproduces the fixed-direction method and the last reproduces the ClusterKV-style selector.
+
+**End to end** (`accept_sweep --preset kmeans_vs_random`, both partitions in one sweep with the incremental PyTorch index, paired by chunk, `src/ssa/results/tvd_4b_8k_kmeans_vs_random.json`; and `--preset fused_kmeans` with the Triton kernels, `tvd_4b_8k_fused_kmeans.json`). Qwen3-4B, 8 WikiText chunks at 8,192 tokens:
+
+| budget | fitted, kernels: K+V read, TVD, top-1 | fitted, PyTorch: TVD | fixed directions: K+V read, TVD, top-1 | TVD ratio, fitted / fixed [95% CI] |
+|---|---|---|---|---|
+| 5% | 7.6%, 0.064 [0.054, 0.075], 92.4% | 0.064 | 8.2%, 0.085 [0.072, 0.097], 90.9% | 0.76 [0.71, 0.80] |
+| 10% | 12.6%, 0.046 [0.038, 0.055], 94.2% | 0.047 | 13.1%, 0.063 [0.053, 0.073], 92.2% | 0.74 [0.69, 0.79] |
+| 20% | 22.5%, 0.032 [0.026, 0.038], 96.6% | 0.031 | 23.0%, 0.044 [0.037, 0.051], 94.9% | 0.72 [0.67, 0.74] |
+| 40% | 42.3%, 0.020 [0.017, 0.024], 97.6% | 0.021 | 42.5%, 0.027 [0.023, 0.030], 97.4% | 0.77 [0.71, 0.82] |
+
+The ratio is from the PyTorch sweep. Centroids are fitted once per KV head with 10 k-means iterations at the first build and then kept; later keys join the nearest centroid. Not yet measured: more than 255 decode steps after the fit, other models, and 32,768 tokens.
+
+**Speed** (`decode_speed --graph --partition {kmeans,random}`, `decode_speed_39f45d3f_*`; ms per token at 16,384 / 32,768 tokens, 20% budget): Qwen3-4B 25.48 / 26.82 with fitted clusters and 25.50 / 26.85 with fixed directions; Qwen3-0.6B 6.64 / 7.71 and 6.68 / 7.75. The binning kernels read each KV head's centroids instead of one shared set of directions; the work per token is otherwise the same, and the fit runs once, before decoding.
+
+**Compared with ClusterKV-style selection** (`ssa.attn.clusterkv`; `quest_replay --clusterkv`, `src/ssa/results/quest_replay_e26ca205_clusterkv.json`; same captures, error divided by the fixed-direction method's at 10–30% reads): k-means clusters with ClusterKV's scoring and our always-read tokens and shared selection have 0.53–0.62 (layer 12), 0.59–0.62 (24) and 0.34–0.49 (35), which is what led to adopting fitted clusters. ClusterKV's reported settings (about one cluster per 80 tokens, the first 16 tokens always read, each query head selecting for itself, and here the not-yet-clustered decode tokens always read, which is this implementation's assumption) have 1.2–1.5 (layer 12), 1.2–2.0 (24) and 0.61–0.65 (35): 1.4–3.6× the current method's error.
+
+**Compared with Quest-style pages**: at matched reads, `quest_matched` has 1.59 [1.53, 1.66] times the fitted-cluster method's TVD at 20% of K+V rows read, 1.44 [1.39, 1.51] at 27%, and 1.32 [1.24, 1.41] at 42% (`ssa.harness.matched_reads` on `tvd_4b_8k_quest_vs_voronoi.json` and `tvd_4b_8k_fused_kmeans.json`: two runs on the same 8 chunks, whose fixed-direction controls agree to within 0.001 TVD).
 

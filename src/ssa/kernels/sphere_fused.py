@@ -34,7 +34,7 @@ POS_INF = tl.constexpr(float("inf"))
 
 
 @triton.jit
-def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
+def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
                 rbar_ptr, flag_ptr, lab_ptr, s_lh, start, stop, nbinned, delta,
                 C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr):
     h = tl.program_id(0)
@@ -51,7 +51,7 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt
         bi = 0
         for c0 in tl.static_range(0, C, BC):
             offs_c = c0 + tl.arange(0, BC)
-            dv = tl.load(dirs_ptr + offs_c[:, None] * D + offs_d[None, :])
+            dv = tl.load(dirs_ptr + h * s_dh + offs_c[:, None] * D + offs_d[None, :])
             sc = tl.sum(dv * kn[None, :], axis=1)
             m = tl.max(sc, axis=0)
             am = tl.argmax(sc, axis=0)
@@ -142,9 +142,6 @@ class SphereIndexFused(SphereIndexGPU):
 
     def __init__(self, *args, async_check: bool = True, **kw):
         super().__init__(*args, **kw)
-        if self.partition != "random":
-            raise NotImplementedError("the Triton kernels use one shared set of directions; "
-                                      "fitted per-head centroids run only in SphereIndexGPU for now")
         self.async_check = async_check
 
     def _bc(self) -> int:
@@ -163,11 +160,16 @@ class SphereIndexFused(SphereIndexGPU):
     def _init(self, K, n):
         super()._init(K, n)
 
+    def _dirs_arg(self):
+        """Directions and their per-head stride for the binning kernels: the shared random
+        directions (stride 0) or each head's fitted centroids."""
+        return (self.cent, self.C * self.d) if self.partition == "kmeans" else (self.dirs, 0)
+
     def _advance(self, K, n):
         new_end = max(1, n - self.window)
         if new_end > self.end:
             _bin_kernel[(self.H_kv,)](
-                K, K.stride(0), K.stride(1), self.dirs, self.sum_dir, self.mmax, self.mmin, self.count,
+                K, K.stride(0), K.stride(1), *self._dirs_arg(), self.sum_dir, self.mmax, self.mmin, self.count,
                 self.ksum, self.mu_ref, self.rbar, self.flags, self.labels, self.labels.stride(0),
                 self.end, new_end, float(new_end - 1), float(self.delta),
                 C=self.C, D=self.d, BC=self._bc(), num_warps=4)
