@@ -1,4 +1,4 @@
-"""`voronoi_skip` — skip key reads using a fixed partition of the unit hypersphere.
+"""`cluster_skip` — skip key reads using a fixed partition of the unit hypersphere.
 
 Per KV head:
 
@@ -149,7 +149,7 @@ def estimate_max_score(q: torch.Tensor, st: dict) -> torch.Tensor:
     return e.masked_fill(st["count"] == 0, -math.inf)
 
 
-@register("voronoi_skip")
+@register("cluster_skip")
 def sphere_skip(q, K, V, *, budget: float, C: int = 256, window: int = 64, rank: str = "est",
                 seed: int = 0, kind: str = "random", center: bool = False, group: str = "per_head",
                 return_info: bool = False, **cfg):

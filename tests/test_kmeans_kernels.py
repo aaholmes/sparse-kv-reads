@@ -66,7 +66,7 @@ def test_graph_decoder_with_fitted_centroids_matches_the_engine_op(capture):
         with torch.inference_mode():
             model(ids[:, :P], cache, start_pos=0)
             if graph:
-                dec = GraphDecoder(model, cache, mode="voronoi", **kw)
+                dec = GraphDecoder(model, cache, mode="cluster", **kw)
                 dec.prepare(P)
                 if capture:
                     dec.capture()

@@ -1,4 +1,4 @@
-"""End-to-end decode speed, fused `voronoi_skip` vs exact attention.
+"""End-to-end decode speed, fused `cluster_skip` vs exact attention.
 
 Qwen3-4B BF16 on the engine. For each context length n: prefill a WikiText-103 prompt in
 chunks (the engine returns logits for every prompt position, so one 32k forward would need
@@ -126,15 +126,15 @@ def profile_step(model, ids, cache, n, impl, cfg) -> dict:
 
 
 CONDITIONS = [("dense", {}),
-              ("voronoi_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("cluster_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False}),
-              ("voronoi_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("cluster_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False})]
 
 
 GRAPH_CONDITIONS = [("dense", {}),
-                    ("voronoi", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "check_every": 16}),
-                    ("voronoi", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "check_every": 16})]
+                    ("cluster", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "check_every": 16}),
+                    ("cluster", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "check_every": 16})]
 
 
 def main() -> None:
@@ -155,8 +155,8 @@ def main() -> None:
     p.add_argument("--tag", default="")
     p.add_argument("--batch", type=int, default=1, help="sequences decoded together (equal lengths)")
     p.add_argument("--partition", default="kmeans", choices=["random", "kmeans"],
-                   help="region directions for the voronoi graph conditions")
-    p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and voronoi)")
+                   help="how clusters are chosen for the cluster graph conditions")
+    p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and cluster)")
     p.add_argument("--flashinfer", action="store_true",
                    help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
     args = p.parse_args()
@@ -180,7 +180,7 @@ def main() -> None:
         if args.graph:
             ref = dense_logits(model, ids, cache, n, warmup=args.warmup, steps=args.steps)
             for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
-                if mode == "voronoi":
+                if mode == "cluster":
                     cfg = {**cfg, "partition": args.partition}
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)

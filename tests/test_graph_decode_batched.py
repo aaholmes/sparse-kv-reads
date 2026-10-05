@@ -12,7 +12,7 @@ pytestmark = pytest.mark.requires_cuda
 
 CFG = TinyCfg(head_dim=16, max_position_embeddings=512, num_attention_heads=4, num_key_value_heads=2)
 P, T, B = 200, 30, 3
-VORONOI = dict(budget=0.3, C=16, window=4, delta=float("inf"), check_every=4)
+CLUSTER = dict(budget=0.3, C=16, window=4, delta=float("inf"), check_every=4)
 
 
 def _ids(seed=0):
@@ -46,7 +46,7 @@ def _batched_vs_separate(mode, capture, cfg, dtype, model_seed=0):
 
 
 @pytest.mark.parametrize("capture", [False, True])
-@pytest.mark.parametrize("mode,cfg", [("dense", {}), ("voronoi", VORONOI)])
+@pytest.mark.parametrize("mode,cfg", [("dense", {}), ("cluster", CLUSTER)])
 def test_batch_matches_separate_runs(mode, cfg, capture):
     together, apart = _batched_vs_separate(mode, capture, cfg, torch.float32)
     assert together.shape == (B, T, CFG.vocab_size)

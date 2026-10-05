@@ -13,7 +13,7 @@ Two variants, both producing the ``labels``/``w`` inputs of ``label_weighted_att
   can do by not applying it there.
 - ``quest_matched``: token 0 and the last ``window`` tokens are always read, and the query heads of
   each KV head share one selection, ranked by the sum over heads of each head's softmax over page
-  scores; these match ``voronoi_skip``, so the remaining differences are pages by position compared
+  scores; these match ``cluster_skip``, so the remaining differences are pages by position compared
   with regions by direction, and Quest's bound compared with our score.
 
 Pure PyTorch; pages are rebuilt from the cache on each call (reference, not a kernel).

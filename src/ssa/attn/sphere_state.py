@@ -1,4 +1,4 @@
-"""v1 incremental hypersphere bins for `voronoi_skip`.
+"""v1 incremental hypersphere bins for `cluster_skip`.
 
 State for one layer, kept across decode steps. Keys are binned once, when they leave the
 exact recent window: centered with the reference mean ``μ_ref``, assigned to the nearest of

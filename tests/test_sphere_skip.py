@@ -13,7 +13,7 @@ from _fixtures import Geom, make_qkv
 
 
 def test_registered():
-    assert "voronoi_skip" in available()
+    assert "cluster_skip" in available()
 
 
 def test_fixed_directions_unit_and_deterministic():

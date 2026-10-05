@@ -20,7 +20,7 @@ def _qkv(n=400, seed=0):
     return q, K.permute(1, 0, 2).contiguous() + 1.5, V.permute(1, 0, 2).contiguous()
 
 
-def test_random_centered_length_score_is_voronoi_skip():
+def test_random_centered_length_score_is_the_fixed_direction_method():
     q, K, V = _qkv()
     n = K.shape[1]
     idx = SphereIndexGPU(C=C, window=W, delta=math.inf, capacity=n)
@@ -53,3 +53,19 @@ def test_every_combination_is_exact_at_full_budget_and_counts_its_summaries():
                                          C=C, window=W)
                 torch.testing.assert_close(label_weighted_attention(q, K, V, lab, w), dense, rtol=1e-10, atol=1e-10)
                 assert summary == (C * (1 + 2 / 16) if score == "length" else C)
+
+
+def test_stale_fit_uses_only_early_keys_and_assigns_the_rest_to_the_nearest_centroid():
+    from ssa.attn.clusterkv import spherical_kmeans
+    from ssa.harness.partition_ablation import group
+    q, K, V = _qkv(n=600, seed=3)
+    n = 600
+    fresh = group(K, n, partition="kmeans", center=True, C=C, window=W)
+    same = group(K, n, partition="kmeans", center=True, C=C, window=W, fit_tokens=n - W - 1)
+    assert torch.equal(fresh["assign"], same["assign"])                  # fitting on every binned key = fresh
+    stale = group(K, n, partition="kmeans", center=True, C=C, window=W, fit_tokens=200)
+    X = K[:, 1:n - W] - K[:, 1:n - W].mean(1, keepdim=True)
+    _, cent = spherical_kmeans(X[:, :200], C=C)
+    nearest = torch.einsum("hmd,hcd->hmc", torch.nn.functional.normalize(X, dim=-1), cent).argmax(-1)
+    assert torch.equal(stale["assign"], nearest)
+    assert not torch.equal(stale["assign"], fresh["assign"])

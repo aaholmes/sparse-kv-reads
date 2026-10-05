@@ -1,4 +1,4 @@
-"""The method was renamed from ``sphere_*`` to ``voronoi_*``; result files keep the old names."""
+"""The method was renamed from ``sphere_*`` to ``voronoi_*`` to ``cluster_*``; result files keep the old names."""
 
 from __future__ import annotations
 
@@ -14,19 +14,20 @@ from _tiny_model import TinyCfg, tiny_model
 
 
 def test_canonical_maps_every_old_name():
-    assert canonical("sphere_skip") == "voronoi_skip"
-    assert canonical("sphere_skip_v1") == "voronoi_skip_v1"
-    assert canonical("sphere_fused") == "voronoi_fused"
-    assert canonical("sphere_sample") == "voronoi_sample"
-    assert canonical("sphere_tail") == "voronoi_tail"
+    new = {"skip": "cluster_skip", "skip_v1": "cluster_skip_v1", "fused": "cluster_fused",
+           "sample": "cluster_tail_sample", "tail": "cluster_tail"}
+    for suffix, name in new.items():
+        assert canonical(f"sphere_{suffix}") == name
+        assert canonical(f"voronoi_{suffix}") == name
+        assert canonical(name) == name
     assert canonical("santa_sys") == "santa_sys"
 
 
 def test_attn_accepts_the_old_name():
     q, K, V = make_qkv(Geom(n_k=64), seed=0)
-    a = attn(q, K, V, impl="voronoi_skip", budget=0.3, C=8, window=4)
-    b = attn(q, K, V, impl="sphere_skip", budget=0.3, C=8, window=4)
-    torch.testing.assert_close(a, b)
+    a = attn(q, K, V, impl="cluster_skip", budget=0.3, C=8, window=4)
+    for old in ("sphere_skip", "voronoi_skip"):
+        torch.testing.assert_close(attn(q, K, V, impl=old, budget=0.3, C=8, window=4), a)
 
 
 def test_engine_op_accepts_the_old_name():
@@ -34,7 +35,7 @@ def test_engine_op_accepts_the_old_name():
     model = tiny_model(cfg).eval()
     ids = torch.randint(0, cfg.vocab_size, (1, 90), generator=torch.Generator().manual_seed(0))
     outs = []
-    for name in ("voronoi_tail", "sphere_tail"):
+    for name in ("cluster_tail", "voronoi_tail", "sphere_tail"):
         install(model, name, budget=0.2, order=1, C=8, window=4, capacity=128)
         cache = model.alloc_cache(91)
         with torch.inference_mode():
@@ -42,6 +43,7 @@ def test_engine_op_accepts_the_old_name():
             outs.append(torch.stack([model(ids[:, t:t + 1], cache)[0, -1] for t in range(80, 90)]))
         uninstall(model)
     torch.testing.assert_close(outs[0], outs[1])
+    torch.testing.assert_close(outs[0], outs[2])
 
 
 def test_plot_reads_old_result_files_into_the_new_series(tmp_path):
@@ -53,4 +55,4 @@ def test_plot_reads_old_result_files_into_the_new_series(tmp_path):
          "tvd": 0.061, "tvd_ci": [0.052, 0.070]},
     ]}))
     s = build_series([p], regions=256)
-    assert s["voronoi_skip"]["x"] == [13.0] and s["voronoi_tail"]["x"] == [14.7]
+    assert s["cluster_skip"]["x"] == [13.0] and s["cluster_tail"]["x"] == [14.7]

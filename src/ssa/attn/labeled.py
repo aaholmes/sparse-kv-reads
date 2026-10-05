@@ -8,7 +8,7 @@ weight per label, ``w[g, label]`` (shared by the query heads of KV head ``g``) o
     out[h] = Σ_j w[label_j] e^{s_j} v_j / Σ_j w[label_j] e^{s_j},     s_j = q_h·k_j / √d
 
 Rows with weight 0 contribute nothing and a kernel need not read them. Weight 1 on chosen
-bins gives `voronoi_skip`; weights ``1/(S π_b)`` on sampled bins give the tail-sampling
+bins gives `cluster_skip`; weights ``1/(S π_b)`` on sampled bins give the tail-sampling
 estimator. Inputs use the engine's cache layout ``K, V [H_kv, n, d]``, read in place.
 """
 

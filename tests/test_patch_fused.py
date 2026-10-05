@@ -34,7 +34,7 @@ def _setup():
 def test_full_budget_matches_dense():
     model, ids = _setup()
     ref = _decode(model, ids)
-    stats = install(model, "voronoi_fused", budget=1.0, C=16, window=4, delta=0.03, group="sum_share")
+    stats = install(model, "cluster_fused", budget=1.0, C=16, window=4, delta=0.03, group="sum_share")
     got = _decode(model, ids)
     uninstall(model)
     torch.testing.assert_close(got, ref, rtol=1e-2, atol=1e-2)
@@ -43,7 +43,7 @@ def test_full_budget_matches_dense():
 
 def test_partial_budget_reads_fewer_rows_and_stays_finite():
     model, ids = _setup()
-    stats = install(model, "voronoi_fused", budget=0.2, C=16, window=4, delta=0.03, group="sum_share")
+    stats = install(model, "cluster_fused", budget=0.2, C=16, window=4, delta=0.03, group="sum_share")
     got = _decode(model, ids)
     uninstall(model)
     assert torch.isfinite(got).all()
@@ -53,7 +53,7 @@ def test_partial_budget_reads_fewer_rows_and_stays_finite():
 
 def test_untracked_mode_records_nothing():
     model, ids = _setup()
-    stats = install(model, "voronoi_fused", budget=0.2, C=16, window=4, track_reads=False)
+    stats = install(model, "cluster_fused", budget=0.2, C=16, window=4, track_reads=False)
     _decode(model, ids)
     uninstall(model)
     assert stats.steps == 0 and stats.kv_read_fraction is None
@@ -61,10 +61,10 @@ def test_untracked_mode_records_nothing():
 
 def test_sample_with_zero_draws_equals_fused():
     model, ids = _setup()
-    install(model, "voronoi_fused", budget=0.2, C=16, window=4, delta=0.03)
+    install(model, "cluster_fused", budget=0.2, C=16, window=4, delta=0.03)
     a = _decode(model, ids)
     uninstall(model)
-    install(model, "voronoi_sample", budget=0.2, S=0, C=16, window=4, delta=0.03)
+    install(model, "cluster_tail_sample", budget=0.2, S=0, C=16, window=4, delta=0.03)
     b = _decode(model, ids)
     uninstall(model)
     torch.testing.assert_close(a, b, rtol=1e-3, atol=1e-3)
@@ -72,10 +72,10 @@ def test_sample_with_zero_draws_equals_fused():
 
 def test_sample_reads_more_rows_than_head_alone():
     model, ids = _setup()
-    s1 = install(model, "voronoi_fused", budget=0.1, C=16, window=4, delta=0.03)
+    s1 = install(model, "cluster_fused", budget=0.1, C=16, window=4, delta=0.03)
     _decode(model, ids)
     uninstall(model)
-    s2 = install(model, "voronoi_sample", budget=0.1, S=3, alpha=0.2, C=16, window=4, delta=0.03)
+    s2 = install(model, "cluster_tail_sample", budget=0.1, S=3, alpha=0.2, C=16, window=4, delta=0.03)
     got = _decode(model, ids)
     uninstall(model)
     assert torch.isfinite(got).all()

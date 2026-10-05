@@ -7,7 +7,7 @@ a 95% bootstrap interval over chunks.
 
 Run:
     uv run python -m ssa.harness.matched_reads src/ssa/results/tvd_4b_8k_quest_vs_voronoi.json \\
-        --a quest_matched --b voronoi_skip --at 0.17 0.23 0.27 0.37 0.42
+        --a quest_matched --b cluster_skip --at 0.17 0.23 0.27 0.37 0.42
 """
 
 from __future__ import annotations

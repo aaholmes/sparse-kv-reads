@@ -16,10 +16,10 @@ def _chunks(c, n=3, T=40, seed=0):
 def test_dense_and_full_budget_have_zero_tvd():
     c = TinyCfg(max_position_embeddings=64)
     model = tiny_model(c).eval()
-    conds = [("dense", {}), ("voronoi_skip", {"budget": 1.0, "C": 8, "window": 4, "center": True}),
-             ("voronoi_skip", {"budget": 0.05, "C": 8, "window": 2, "center": True})]
+    conds = [("dense", {}), ("cluster_skip", {"budget": 1.0, "C": 8, "window": 4, "center": True}),
+             ("cluster_skip", {"budget": 0.05, "C": 8, "window": 2, "center": True})]
     res = run_conditions(model, _chunks(c), conditions=conds, prefill_len=24)
-    assert [r["impl"] for r in res] == ["dense", "voronoi_skip", "voronoi_skip"]
+    assert [r["impl"] for r in res] == ["dense", "cluster_skip", "cluster_skip"]
     for r in res[:2]:
         assert max(r["chunk_tvd"]) < 1e-5 and max(r["chunk_kl"]) < 1e-5
         assert r["top1_agree"] == 1.0
@@ -31,7 +31,7 @@ def test_dense_and_full_budget_have_zero_tvd():
 def test_paired_summary_intervals():
     c = TinyCfg(max_position_embeddings=64)
     model = tiny_model(c).eval()
-    conds = [("dense", {}), ("voronoi_skip", {"budget": 0.05, "C": 8, "window": 2, "center": True})]
+    conds = [("dense", {}), ("cluster_skip", {"budget": 0.05, "C": 8, "window": 2, "center": True})]
     res = run_conditions(model, _chunks(c, n=4), conditions=conds, prefill_len=24)
     s = paired_summary(res, n_boot=200, seed=0)
     row = s[1]
@@ -44,8 +44,8 @@ def test_v1_delta_zero_matches_stateless_and_reports_rebuilds():
     c = TinyCfg(max_position_embeddings=64)
     model = tiny_model(c).eval()
     base = {"budget": 0.2, "C": 8, "window": 2, "group": "sum_share"}
-    conds = [("dense", {}), ("voronoi_skip", {**base, "center": True}),
-             ("voronoi_skip_v1", {**base, "delta": 0.0}), ("voronoi_skip_v1", {**base, "delta": float("inf")})]
+    conds = [("dense", {}), ("cluster_skip", {**base, "center": True}),
+             ("cluster_skip_v1", {**base, "delta": 0.0}), ("cluster_skip_v1", {**base, "delta": float("inf")})]
     res = run_conditions(model, _chunks(c), conditions=conds, prefill_len=24)
     assert abs(res[1]["tvd"] - res[2]["tvd"]) < 1e-6
     assert res[2]["rebuild_rate"] > 0 and res[3]["rebuild_rate"] == 0

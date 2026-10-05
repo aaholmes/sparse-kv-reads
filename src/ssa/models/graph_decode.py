@@ -39,7 +39,7 @@ class GraphDecoder:
         self.pos = torch.zeros(1, dtype=torch.long, device=dev)
         self.n_dev = torch.zeros(1, dtype=torch.int32, device=dev)
         cap = cache.max_seq_len
-        mode = "voronoi" if mode == "sphere" else mode           # old name
+        mode = "cluster" if mode in ("sphere", "voronoi") else mode   # old names
         self.mode = mode
         if mode == "dense":
             self.attn = [DenseAttentionGraph(H=B * self.H, H_kv=B * self.H_kv, d=self.d, dtype=dtype, device=dev)
@@ -49,7 +49,7 @@ class GraphDecoder:
             self.fi = FlashInferDecode(H=self.H, H_kv=self.H_kv, d=self.d, max_len=cap, dtype=dtype, device=dev,
                                        batch=B)
             self.attn = None
-        elif mode == "voronoi":
+        elif mode == "cluster":
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
                                           check_every=check_every, partition=partition) for _ in model.layers]
         else:
@@ -59,7 +59,7 @@ class GraphDecoder:
 
     def prepare(self, n: int) -> None:
         """Build attention state from the first ``n`` cached positions (after prefill)."""
-        if self.mode == "voronoi":
+        if self.mode == "cluster":
             for i, idx in enumerate(self.attn):
                 idx.prepare(self._heads(self.cache.k[i]), n, self.B * self.H)
 
@@ -124,7 +124,7 @@ class GraphDecoder:
             self.graph.replay()
         else:
             self.logits = self._body()
-        if self.mode == "voronoi":
+        if self.mode == "cluster":
             for i, idx in enumerate(self.attn):
                 idx.after_replay(self._heads(self.cache.k[i]))
         self.cache.cur_len = pos + 1

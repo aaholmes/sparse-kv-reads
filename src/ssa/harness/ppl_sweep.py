@@ -82,15 +82,15 @@ SKIPK_CONDITIONS = [
 # matched budget; santa_sys references (read every key).
 SPHERE_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True}) for b in (0.05, 0.1, 0.2, 0.3, 0.5)]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "rank": "random"}) for b in (0.1, 0.3)]
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True}) for b in (0.05, 0.1, 0.2, 0.3, 0.5)]
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True, "rank": "random"}) for b in (0.1, 0.3)]
     + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
 )
 
 # Shared selection (one region set per KV head, ranked by summed per-head mass shares).
 SPHERE_SHARED_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
        for b in (0.05, 0.1, 0.2, 0.3, 0.4)]
 )
 
@@ -98,9 +98,9 @@ SPHERE_SHARED_CONDITIONS = (
 # (~8 keys, matching the 2k region size) to separate context length from region size.
 SPHERE_SHARED_8K_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"})
        for b in (0.02, 0.05, 0.1, 0.2)]
-    + [("voronoi_skip", {"budget": b, "C": 1024, "center": True, "group": "sum_share"})
+    + [("cluster_skip", {"budget": b, "C": 1024, "center": True, "group": "sum_share"})
        for b in (0.05, 0.1)]
     + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
 )
@@ -108,33 +108,33 @@ SPHERE_SHARED_8K_CONDITIONS = (
 # 8k completion: the budgets needed to reach santa_sys S=256's TVD.
 SPHERE_SHARED_8K_HI_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.3, 0.4)]
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.3, 0.4)]
 )
 
 # v1 incremental bins end to end: delta=0.03 (recommended) and delta=inf (never recenter).
 SPHERE_V1_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_skip_v1", {"budget": b, "C": 256, "group": "sum_share", "delta": dl})
+    + [("cluster_skip_v1", {"budget": b, "C": 256, "group": "sum_share", "delta": dl})
        for dl in (0.03, float("inf")) for b in (0.1, 0.2)]
 )
 
 # Fused Triton kernels in the engine: TVD compared with the simulator results.
 SPHERE_FUSED_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+    + [("cluster_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                          "check_every": 16, "partition": "random"}) for b in (0.1, 0.2)]
 )
 
 # Fused kernels at three budgets with systematic-sampling references (for other models / contexts).
 SPHERE_FUSED_REFS_CONDITIONS = (
     [("dense", {})]
-    + [("voronoi_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+    + [("cluster_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
                          "check_every": 16, "partition": "random"}) for b in (0.05, 0.1, 0.2)]
     + [("santa_sys", {"S": 64}), ("santa_sys", {"S": 256})]
 )
 
 def _fused(b, C=256):
-    return ("voronoi_fused", {"budget": b, "C": C, "window": 64, "delta": 0.03, "group": "sum_share",
+    return ("cluster_fused", {"budget": b, "C": C, "window": 64, "delta": 0.03, "group": "sum_share",
                              "check_every": 16, "partition": "random"})
 
 
@@ -145,7 +145,7 @@ FUSED_HI_ONLY_CONDITIONS = [("dense", {})] + [_fused(b) for b in (0.3, 0.4)]
 FUSED_C_SCAN_CONDITIONS = [("dense", {})] + [_fused(b, C) for C in (128, 512) for b in (0.1, 0.2, 0.4)]
 
 def _sample(h, S, a, C=256):
-    return ("voronoi_sample", {"budget": h, "S": S, "alpha": a, "C": C, "window": 64, "delta": 0.03,
+    return ("cluster_tail_sample", {"budget": h, "S": S, "alpha": a, "C": C, "window": 64, "delta": 0.03,
                               "check_every": 16, "partition": "random"})
 
 
@@ -154,7 +154,7 @@ SAMPLE_GRID_CONDITIONS = ([("dense", {}), _fused(0.15)]
                           + [_sample(h, S, a) for h in (0.05, 0.1, 0.2) for S in (8, 32) for a in (0.1, 0.5)])
 SAMPLE_FOCUS_CONDITIONS = [("dense", {})] + [_sample(h, S, 0.5) for h in (0.1, 0.2) for S in (8, 32)]
 def _tail(b, order=1, C=256):
-    return ("voronoi_tail", {"budget": b, "order": order, "C": C, "window": 64, "delta": 0.03,
+    return ("cluster_tail", {"budget": b, "order": order, "C": C, "window": 64, "delta": 0.03,
                             "group": "sum_share", "check_every": 16, "partition": "random"})
 
 
@@ -164,11 +164,12 @@ TAIL_CONDITIONS = ([("dense", {})] + [_tail(b) for b in (0.05, 0.1, 0.2, 0.4)]
 # Convergence at large budgets, and the estimate on every layer but the first.
 TAIL_CONV_CONDITIONS = [("dense", {})] + [_tail(b, o) for b in (0.7, 1.0) for o in (1, "drop")]
 TAIL_NO_L0_CONDITIONS = [("dense", {})] + [(i, {**c, "drop_layers": [0]}) for i, c in (_tail(0.1), _tail(0.2))]
-# Quest-style pages (our exact set, shared selection) and voronoi_skip in one sweep, both in PyTorch.
-QUEST_VS_VORONOI_CONDITIONS = (
+# Quest-style pages (our exact set, shared selection) and cluster_skip (fixed directions) in one sweep,
+# both in PyTorch.
+QUEST_VS_CLUSTER_CONDITIONS = (
     [("dense", {})]
     + [("quest_matched", {"budget": b, "page": 16, "window": 64}) for b in (0.1, 0.2, 0.3, 0.4)]
-    + [("voronoi_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.05, 0.1, 0.2, 0.4)]
+    + [("cluster_skip", {"budget": b, "C": 256, "center": True, "group": "sum_share"}) for b in (0.05, 0.1, 0.2, 0.4)]
 )
 # Fitted (k-means) centroids compared with fixed random directions: one sweep, the incremental
 # PyTorch index for both, tail dropped.
@@ -188,13 +189,16 @@ CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
                      "sphere_shared_8k": SPHERE_SHARED_8K_CONDITIONS,
                      "sphere_shared_8k_hi": SPHERE_SHARED_8K_HI_CONDITIONS,
                      "sphere_v1": SPHERE_V1_CONDITIONS,
-                     "voronoi_fused": SPHERE_FUSED_CONDITIONS,
+                     "cluster_fused": SPHERE_FUSED_CONDITIONS,
                      "sphere_fused_refs": SPHERE_FUSED_REFS_CONDITIONS,
                      "fused_hi": FUSED_HI_CONDITIONS, "fused_hi_only": FUSED_HI_ONLY_CONDITIONS,
                      "fused_C_scan": FUSED_C_SCAN_CONDITIONS, "sample_grid": SAMPLE_GRID_CONDITIONS,
                      "sample_focus": SAMPLE_FOCUS_CONDITIONS, "quant8": QUANT8_CONDITIONS,
                      "quant4": QUANT4_CONDITIONS, "tail": TAIL_CONDITIONS,
-                     "tail_conv": TAIL_CONV_CONDITIONS, "fused_kmeans": FUSED_KMEANS_CONDITIONS, "kmeans_vs_random": KMEANS_VS_RANDOM_CONDITIONS, "quest_vs_voronoi": QUEST_VS_VORONOI_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS}
+                     "tail_conv": TAIL_CONV_CONDITIONS, "tail_no_l0": TAIL_NO_L0_CONDITIONS,
+                     "fused_kmeans": FUSED_KMEANS_CONDITIONS, "kmeans_vs_random": KMEANS_VS_RANDOM_CONDITIONS,
+                     "quest_vs_cluster": QUEST_VS_CLUSTER_CONDITIONS,
+                     "quest_vs_voronoi": QUEST_VS_CLUSTER_CONDITIONS}          # old preset name
 
 
 def _total_budget(impl: str, cfg: dict) -> int | None:
@@ -218,7 +222,7 @@ def _run_condition(model, chunks, impl, cfg, *, prefill_len, n_runs) -> dict:
             "token_count": r["token_count"], "n_runs": 1,
             "wall_seconds": dt, "sec_per_token": dt / max(r["token_count"], 1),
         }
-    if canonical(impl) in ("topk", "voronoi_skip", "voronoi_skip_v1", "voronoi_fused", "voronoi_sample"):  # single run
+    if canonical(impl) in ("topk", "cluster_skip", "cluster_skip_v1", "cluster_fused", "cluster_tail_sample"):  # single run
         stats = install(model, impl, **cfg)
         r = decode_ppl(model, chunks, prefill_len=prefill_len)
         uninstall(model)

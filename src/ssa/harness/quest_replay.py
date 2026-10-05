@@ -1,15 +1,15 @@
-"""Offline comparison of `voronoi_skip` with Quest- and ClusterKV-style selection at matched reads.
+"""Offline comparison of `cluster_skip` with Quest- and ClusterKV-style selection at matched reads.
 
 On captured Qwen3-4B tensors (``capture_qkv --n-contexts``), for sampled decode steps and all heads:
 single-layer attention-output error ``Σ‖out − exact‖² / Σ‖exact‖²`` against K+V rows read, for
-``voronoi_skip`` (256 regions, window 64, shared selection), ``quest_plain`` (16-token pages, per-head
-selection, nothing always read) and ``quest_matched`` (``voronoi_skip``'s exact set and shared selection);
+``cluster_skip`` (256 regions, window 64, shared selection), ``quest_plain`` (16-token pages, per-head
+selection, nothing always read) and ``quest_matched`` (``cluster_skip``'s exact set and shared selection);
 optionally ``clusterkv_plain`` (cosine k-means, ~1 cluster per 80 tokens, first 16 tokens and
 not-yet-clustered decode tokens always read, per-head selection) and ``clusterkv_matched_256`` /
 ``clusterkv_matched_n80`` (our exact set and shared selection, 256 or ~n/80 clusters).
 Reads count each method's summaries: our regions' directions, lengths and counts; Quest's
 per-page minimum and maximum keys. Each context's error-vs-reads curve is interpolated
-(log-linearly) to common read fractions, and the ratio to ``voronoi_skip`` is reported with a
+(log-linearly) to common read fractions, and the ratio to ``cluster_skip`` is reported with a
 95% bootstrap interval over contexts.
 
 Run:
@@ -28,7 +28,7 @@ from ..attn.quest import quest_labels_and_weights
 from ..attn.sphere_gpu import SphereIndexGPU
 
 BUDGETS = (0.025, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5)
-METHODS = ("voronoi_skip", "quest_plain", "quest_matched")
+METHODS = ("cluster_skip", "quest_plain", "quest_matched")
 CLUSTERKV = ("clusterkv_plain", "clusterkv_matched_256", "clusterkv_matched_n80")
 TARGETS = (0.10, 0.15, 0.20, 0.30)
 
@@ -56,7 +56,7 @@ def eval_step(q, K, V, n: int, *, C: int = 256, window: int = 64, page: int = 16
             ckv[m] = dict(variant="matched", C=Cm, window=window, clusters=spherical_kmeans(K[:, st:en], C=Cm))
     for b in BUDGETS:
         for m in methods:
-            if m == "voronoi_skip":
+            if m == "cluster_skip":
                 labels, w = idx.labels_and_weights(q, n=n, budget=b)
                 summary = C * (1 + 2 / d)
             elif m in ckv:
@@ -100,7 +100,7 @@ def main() -> None:
     if not files:
         raise SystemExit(f"no captures match {args.captures}")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    methods = ("voronoi_skip",) + CLUSTERKV if args.clusterkv else METHODS
+    methods = ("cluster_skip",) + CLUSTERKV if args.clusterkv else METHODS
     acc: dict = {}                                   # (layer, method, budget) -> per-context [err, den, reads, steps]
     for fi, f in enumerate(files):
         cap = torch.load(f, weights_only=False)
@@ -136,17 +136,17 @@ def main() -> None:
                     "curve": [{"budget": b, "reads": sum(acc[(L, m, b)][c][2] / acc[(L, m, b)][c][3] for c in ctxs) / len(files),
                                "rel_err": sum(acc[(L, m, b)][c][0] for c in ctxs) / sum(acc[(L, m, b)][c][1] for c in ctxs)}
                               for b in BUDGETS]}
-            if m != "voronoi_skip":
-                rows["ratio_to_voronoi"] = {}
+            if m != "cluster_skip":
+                rows["ratio_to_fixed_directions"] = {}
                 for x in TARGETS:
                     em = [interp_log(*curves[(L, m, c)], x) for c in ctxs]
-                    ev = [interp_log(*curves[(L, "voronoi_skip", c)], x) for c in ctxs]
+                    ev = [interp_log(*curves[(L, "cluster_skip", c)], x) for c in ctxs]
                     if any(v is None for v in em + ev):
-                        rows["ratio_to_voronoi"][str(x)] = None
+                        rows["ratio_to_fixed_directions"][str(x)] = None
                         continue
                     em_t, ev_t = torch.tensor(em), torch.tensor(ev)
                     r = em_t[boot].sum(1) / ev_t[boot].sum(1)
-                    rows["ratio_to_voronoi"][str(x)] = [float(em_t.sum() / ev_t.sum()),
+                    rows["ratio_to_fixed_directions"][str(x)] = [float(em_t.sum() / ev_t.sum()),
                                                         float(r.quantile(0.025)), float(r.quantile(0.975))]
             summary.append(rows)
     payload = stamp({"kind": "quest_replay", "methods": methods, "captures": [Path(f).name for f in files], "budgets": BUDGETS,
@@ -156,8 +156,8 @@ def main() -> None:
     for r in summary:
         pts = "  ".join(f"{c['reads']:.3f}:{c['rel_err']:.2e}" for c in r["curve"])
         print(f"L{r['layer']:>2} {r['method']:13s} {pts}")
-        for x, v in (r.get("ratio_to_voronoi") or {}).items():
-            print(f"      at {float(x):.0%} reads: error / voronoi_skip's = "
+        for x, v in (r.get("ratio_to_fixed_directions") or {}).items():
+            print(f"      at {float(x):.0%} reads: error / cluster_skip's (fixed directions) = "
                   + (f"{v[0]:.2f} [{v[1]:.2f}, {v[2]:.2f}]" if v else "outside measured range"))
     print(f"wrote {out}")
 

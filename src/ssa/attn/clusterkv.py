@@ -9,7 +9,7 @@ to the budget. Two variants, both producing the ``labels``/``w`` inputs of
   always read, and each query head selecting its own clusters (the KV head reads the union).
   ClusterKV clusters new tokens every 320 decode steps; tokens after ``clustered_end`` (those not
   yet clustered) are treated as always read, which is this implementation's assumption.
-- ``matched``: ``voronoi_skip``'s always-read set (token 0 and the last ``window`` tokens) and one
+- ``matched``: ``cluster_skip``'s always-read set (token 0 and the last ``window`` tokens) and one
   shared selection per KV head (ranked by the sum over its query heads of each head's softmax over
   cluster scores), with ``C`` clusters; the remaining differences are k-means clusters compared
   with fixed directions (and our mean-centering), and ``q·centroid`` compared with our score.

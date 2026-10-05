@@ -1,27 +1,27 @@
-# Detailed results for `voronoi_skip`
+# Detailed results for `cluster_skip`
 
 Supporting detail for the [README](../README.md). Unless stated otherwise, results are for Qwen3-4B in bf16 on WikiText-103, with 8 text chunks per setting (2,040 scored decode steps). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's; reads are key and value (K+V) rows, including region summaries; brackets are 95% bootstrap confidence intervals over chunks. Timings are on one RTX 5060 Ti GPU (16 GB, 448 GB/s).
 
-**Fixed directions and fitted clusters.** The method first grouped keys by the nearest of 256 fixed random directions (`partition="random"`, called `voronoi_skip` in this file and in older result files); since October 2026 it groups them by centroids fitted with k-means at the end of the prompt (`partition="kmeans"`, the default). Every section below was measured with fixed directions unless it says otherwise. [Fitted clusters](#fitted-clusters) gives the results with the current method.
+**Fixed directions and fitted clusters.** The method first grouped keys by the nearest of 256 fixed random directions (`partition="random"`; this file calls that version `cluster_skip`, and older result files call it `sphere_skip` or `voronoi_skip`); since October 2026 it groups them by centroids fitted with k-means at the end of the prompt (`partition="kmeans"`, the default). Every section below was measured with fixed directions unless it says otherwise. [Fitted clusters](#fitted-clusters) gives the results with the current method.
 
 ## Fidelity compared with systematic sampling
 
 | context | method | K+V rows read | TVD from exact |
 |---|---|---|---|
 | 2048 | systematic sampling, 64 samples | 51.7% | 0.054 [0.048, 0.059] |
-| 2048 | `voronoi_skip`, 20% budget | 30.2% | 0.041 [0.036, 0.045] |
+| 2048 | `cluster_skip`, 20% budget | 30.2% | 0.041 [0.036, 0.045] |
 | 2048 | systematic sampling, 256 samples | 54.4% | 0.023 [0.020, 0.026] |
-| 2048 | `voronoi_skip`, 40% budget | 49.3% | 0.024 [0.022, 0.027] |
+| 2048 | `cluster_skip`, 40% budget | 49.3% | 0.024 [0.022, 0.027] |
 | 8192 | systematic sampling, 64 samples | 50.5% | 0.058 [0.049, 0.065] |
-| 8192 | `voronoi_skip`, 10% budget | 13.1% | 0.063 [0.053, 0.074] |
+| 8192 | `cluster_skip`, 10% budget | 13.1% | 0.063 [0.053, 0.074] |
 | 8192 | systematic sampling, 256 samples | 51.4% | 0.026 [0.023, 0.028] |
-| 8192 | `voronoi_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
+| 8192 | `cluster_skip`, 40% budget | 42.5% | 0.027 [0.023, 0.030] |
 | 32768 | systematic sampling, 64 samples | 50.1% | 0.057 [0.046, 0.066] |
-| 32768 | `voronoi_skip`, 20% budget | 21.2% | 0.064 [0.052, 0.074] |
+| 32768 | `cluster_skip`, 20% budget | 21.2% | 0.064 [0.052, 0.074] |
 | 32768 | systematic sampling, 256 samples | 50.4% | 0.027 [0.022, 0.031] |
-| 32768 | `voronoi_skip`, 40% budget | 40.9% | 0.040 [0.031, 0.047] |
+| 32768 | `cluster_skip`, 40% budget | 40.9% | 0.040 [0.031, 0.047] |
 
-- At moderate fidelity (64-sample sampling's TVD), `voronoi_skip` needs about half the reads at 2048 tokens, 0.29× at 8192 and 0.50× at 32,768. At high fidelity (256 samples) it ties at 2048, reads ~17% less at 8192, and is not matched within a 40% budget at 32,768.
+- At moderate fidelity (64-sample sampling's TVD), `cluster_skip` needs about half the reads at 2048 tokens, 0.29× at 8192 and 0.50× at 32,768. At high fidelity (256 samples) it ties at 2048, reads ~17% less at 8192, and is not matched within a 40% budget at 32,768.
 - At a fixed budget, TVD is 32–45% higher at 32,768 tokens than at 8192, while sampling's is unchanged: the dropped tail grows with the cache.
 - Choosing random regions at a matched budget gives 3–4× the TVD (2048 tokens), so the ranking does the work.
 - Updating regions incrementally, recentering a head only when its mean has moved more than 3% of the typical centered key length, matches rebuilding them every step (TVD 0.063 vs 0.062 at a 10% budget, 2048 tokens). The mean moves by about 1/n of that length per token, so recentering is rare after a long prompt.
@@ -29,7 +29,7 @@ Supporting detail for the [README](../README.md). Unless stated otherwise, resul
 ## Other models, text and settings
 
 - **Qwen3-0.6B.** At the TVD of 64-sample sampling (0.097 at 8192 tokens, 0.095 at 32,768), a 10% budget gives 0.093 and 0.091 with 0.26× and 0.23× the reads. At 30–40% budgets it matches 256-sample sampling (0.044) with 0.68× (8192) and 0.62× (32,768) of its reads. Unlike Qwen3-4B, its TVD does not rise with context.
-- **Python code** (8192 tokens). Budgets of 5/10/20/30/40% give TVD 0.035 / 0.025 / 0.017 / 0.012 / 0.009, 2–3× lower than on WikiText. Sampling gives 0.021 (64 samples) and 0.010 (256); `voronoi_skip` matches them with 0.33× and 0.76× of the reads.
+- **Python code** (8192 tokens). Budgets of 5/10/20/30/40% give TVD 0.035 / 0.025 / 0.017 / 0.012 / 0.009, 2–3× lower than on WikiText. Sampling gives 0.021 (64 samples) and 0.010 (256); `cluster_skip` matches them with 0.33× and 0.76× of the reads.
 - **Number of regions** (8192 tokens). At matched reads, 512 regions give 8–13% lower TVD than 256, and 128 give 14–15% higher. Finer regions help despite their larger summary cost, so 512 is the better choice at long context.
 - **The first token.** It takes 36–65% of all attention at layers 12–35 in each of 16 WikiText and Python contexts tested, whatever its text, so it is always read.
 
@@ -41,9 +41,9 @@ As reference points for what a given TVD means, Qwen3-4B with weight-only round-
 |---|---|---|
 | 8-bit weights | 0.018 [0.015, 0.019] | 97.9% |
 | 4-bit weights, groups of 128 | 0.144 [0.125, 0.159] | 84.0% |
-| `voronoi_skip`, 20% budget | 0.044 | — |
+| `cluster_skip`, 20% budget | 0.044 | — |
 
-`voronoi_skip` at 20% falls between the two, and on code at 20% (0.017) it matches 8-bit. Plain round-to-nearest 4-bit is much worse than calibrated 4-bit methods, so it is a loose bound.
+`cluster_skip` at 20% falls between the two, and on code at 20% (0.017) it matches 8-bit. Plain round-to-nearest 4-bit is much worse than calibrated 4-bit methods, so it is a loose bound.
 
 ## Sampling the skipped regions
 
@@ -128,11 +128,11 @@ Needle-in-a-haystack tasks modelled on RULER's (`ssa.harness.needle`, my own imp
 
 ## Comparison with Quest
 
-Quest (arXiv:2406.10774) splits the cache into 16-token pages, stores each page's element-wise minimum and maximum keys, and reads the pages with the highest bound `Σ_i max(q_i·min_i, q_i·max_i)` on `q·k` (`ssa.attn.quest`). `quest_matched` adds `voronoi_skip`'s always-read tokens (token 0 and the last 64) and one shared selection per KV head, so the remaining differences are pages by position compared with regions by direction, and Quest's bound compared with our score. Reads include each method's summaries: Quest's two keys per page cost ~6% of K+V rows.
+Quest (arXiv:2406.10774) splits the cache into 16-token pages, stores each page's element-wise minimum and maximum keys, and reads the pages with the highest bound `Σ_i max(q_i·min_i, q_i·max_i)` on `q·k` (`ssa.attn.quest`). `quest_matched` adds `cluster_skip`'s always-read tokens (token 0 and the last 64) and one shared selection per KV head, so the remaining differences are pages by position compared with regions by direction, and Quest's bound compared with our score. Reads include each method's summaries: Quest's two keys per page cost ~6% of K+V rows.
 
-End to end (`accept_sweep --preset quest_vs_voronoi`, both methods in PyTorch in one sweep; `src/ssa/results/tvd_4b_8k_quest_vs_voronoi.json`; `ssa.harness.matched_reads` interpolates each chunk's TVD along each curve and bootstraps over chunks):
+End to end (`accept_sweep --preset quest_vs_cluster`, both methods in PyTorch in one sweep; `src/ssa/results/tvd_4b_8k_quest_vs_voronoi.json`; `ssa.harness.matched_reads` interpolates each chunk's TVD along each curve and bootstraps over chunks):
 
-| K+V reads | TVD, `quest_matched` | TVD, `voronoi_skip` | ratio [95% CI] |
+| K+V reads | TVD, `quest_matched` | TVD, `cluster_skip` | ratio [95% CI] |
 |---|---|---|---|
 | 20% | 0.0555 | 0.0487 | 1.14 [1.10, 1.18] |
 | 23% | 0.0489 | 0.0434 | 1.13 [1.08, 1.17] |
@@ -141,7 +141,7 @@ End to end (`accept_sweep --preset quest_vs_voronoi`, both methods in PyTorch in
 | 37% | 0.0305 | 0.0307 | 1.00 [0.95, 1.04] |
 | 42% | 0.0270 | 0.0271 | 1.00 [0.95, 1.04] |
 
-`quest_matched` cannot read less than 17%; `voronoi_skip` reaches 8% (TVD 0.084).
+`quest_matched` cannot read less than 17%; `cluster_skip` reaches 8% (TVD 0.084).
 
 Offline, per layer (`ssa.harness.quest_replay`, 8 WikiText contexts at 8k, single-layer attention-output error; `src/ssa/results/quest_replay_0a8e6747.json`), the comparison goes both ways: `quest_matched` has 1.3–1.9× our error at layer 12 at 10–30% reads, 0.27–0.88× at layer 24, and crosses over at layer 35 (1.58× at 10%, 0.74× at 30%). `quest_plain`, which pages every token and lets each query head choose its own pages, has 8–127× our error at 15–30% reads: heads that attend mostly to recent tokens lose them, because the bound over 128 dimensions is too loose to rank those pages near the top. The Quest paper keeps the first two layers dense and does not state whether recent tokens are always read or whether selection is per head; these runs apply sparsity to every layer for both methods.
 

@@ -1,14 +1,14 @@
-"""Which choice separates `voronoi_skip` from ClusterKV-style selection: partition, centering or score.
+"""Which choice separates `cluster_skip` from ClusterKV-style selection: partition, centering or score.
 
 All eight combinations of
   partition: ``random`` (nearest of C fixed random directions) or ``kmeans`` (cosine k-means)
   center:    keys mean-centered before grouping and scoring, or raw
   score:     ``length`` (max key length × projection on the group's mean direction; min length when
              the projection is negative) or ``qcentroid`` (projection on the mean direction alone)
-share `voronoi_skip`'s always-read set (token 0 and the last ``window`` tokens), shared selection per
-KV head and C groups. ``random/centered/length`` is `voronoi_skip`; ``kmeans/raw/qcentroid`` is
+share `cluster_skip`'s always-read set (token 0 and the last ``window`` tokens), shared selection per
+KV head and C groups. ``random/centered/length`` is `cluster_skip`; ``kmeans/raw/qcentroid`` is
 ``clusterkv_matched`` (both checked by tests). On captured tensors, single-layer attention-output
-error is interpolated to common K+V read fractions and divided by `voronoi_skip`'s, with a 95%
+error is interpolated to common K+V read fractions and divided by `cluster_skip`'s, with a 95%
 bootstrap interval over contexts.
 
 Run:
@@ -37,8 +37,11 @@ def name(combo) -> str:
     return f"{p}/{'centered' if c else 'raw'}/{s}"
 
 
-def group(K: torch.Tensor, n: int, *, partition: str, center: bool, C: int, window: int, seed: int = 0):
-    """Assign binned keys ``K[:, 1:n-window]`` to groups; returns the per-group statistics."""
+def group(K: torch.Tensor, n: int, *, partition: str, center: bool, C: int, window: int, seed: int = 0,
+          fit_tokens: int | None = None):
+    """Assign binned keys ``K[:, 1:n-window]`` to groups; returns the per-group statistics.
+    With ``partition="kmeans"`` and ``fit_tokens``, the centroids are fitted on the first
+    ``fit_tokens`` binned keys only, and every key then joins its nearest centroid (a stale fit)."""
     H_kv, _, d = K.shape
     end = max(1, n - window)
     X = K[:, 1:end]
@@ -50,7 +53,11 @@ def group(K: torch.Tensor, n: int, *, partition: str, center: bool, C: int, wind
         dirs = fixed_directions(C, d, seed=seed, dtype=K.dtype, device=K.device)
         assign = (Xn @ dirs.t()).argmax(-1)
     elif partition == "kmeans":
-        assign, _ = spherical_kmeans(X, C=C, seed=seed)
+        if fit_tokens is None or fit_tokens >= X.shape[1]:
+            assign, _ = spherical_kmeans(X, C=C, seed=seed)
+        else:
+            _, cent = spherical_kmeans(X[:, :fit_tokens], C=C, seed=seed)
+            assign = torch.einsum("hmd,hcd->hmc", Xn, cent).argmax(-1)
     else:
         raise ValueError(f"unknown partition {partition!r}")
     kw = dict(dtype=K.dtype, device=K.device)
@@ -160,16 +167,16 @@ def main() -> None:
     summary = []
     for L in layers:
         for combo in COMBOS:
-            row = {"layer": L, "combo": name(combo), "ratio_to_voronoi": {}}
+            row = {"layer": L, "combo": name(combo), "ratio_to_fixed_directions": {}}
             for x in TARGETS:
                 em = [interp_log(*curve(L, combo, c), x) for c in ctxs]
                 ev = [interp_log(*curve(L, BASE, c), x) for c in ctxs]
                 if any(v is None for v in em + ev):
-                    row["ratio_to_voronoi"][str(x)] = None
+                    row["ratio_to_fixed_directions"][str(x)] = None
                     continue
                 a, b = torch.tensor(em), torch.tensor(ev)
                 r = a[boot].sum(1) / b[boot].sum(1)
-                row["ratio_to_voronoi"][str(x)] = [float(a.sum() / b.sum()), float(r.quantile(0.025)), float(r.quantile(0.975))]
+                row["ratio_to_fixed_directions"][str(x)] = [float(a.sum() / b.sum()), float(r.quantile(0.025)), float(r.quantile(0.975))]
             summary.append(row)
     payload = stamp({"kind": "partition_ablation", "captures": [Path(f).name for f in files], "budgets": BUDGETS,
                      "C": 256, "window": 64, "step_stride": args.step_stride, "summary": summary})
@@ -177,7 +184,7 @@ def main() -> None:
     out.write_text(json.dumps(payload, indent=1))
     for r in summary:
         cells = "  ".join(f"{float(x):.0%}: " + (f"{v[0]:.2f} [{v[1]:.2f}, {v[2]:.2f}]" if v else "—")
-                          for x, v in r["ratio_to_voronoi"].items())
+                          for x, v in r["ratio_to_fixed_directions"].items())
         print(f"L{r['layer']:>2} {r['combo']:26s} {cells}")
     print(f"wrote {out}")
 

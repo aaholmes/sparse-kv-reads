@@ -2,7 +2,7 @@
 
 Implementations register themselves in ``_REGISTRY`` via the ``@register`` decorator;
 ``attn`` dispatches by name. Implementations: dense, topk, santa, santa_strat, santa_sys,
-santa_hybrid, santa_block, skip_k, voronoi_skip.
+santa_hybrid, santa_block, skip_k, cluster_skip.
 """
 
 from __future__ import annotations
@@ -13,10 +13,11 @@ import torch
 
 _REGISTRY: dict[str, Callable] = {}
 
-# The key-skipping method was renamed from ``sphere_*`` to ``voronoi_*``; result files written
-# before the rename record the old names, which are still accepted everywhere.
-LEGACY_NAMES = {"sphere_skip": "voronoi_skip", "sphere_skip_v1": "voronoi_skip_v1", "sphere_fused": "voronoi_fused",
-                "sphere_sample": "voronoi_sample", "sphere_tail": "voronoi_tail"}
+# The key-skipping method was renamed twice (``sphere_*``, then ``voronoi_*``, now ``cluster_*``);
+# result files written earlier record the old names, which are still accepted everywhere.
+_RENAMED = {"skip": "cluster_skip", "skip_v1": "cluster_skip_v1", "fused": "cluster_fused",
+            "sample": "cluster_tail_sample", "tail": "cluster_tail"}
+LEGACY_NAMES = {f"{old}_{k}": v for old in ("sphere", "voronoi") for k, v in _RENAMED.items()}
 
 
 def canonical(name: str) -> str:

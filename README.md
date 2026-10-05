@@ -14,7 +14,7 @@ Attention weights each cached value by the softmax of the query's dot product wi
 6. **Read the top clusters' keys and values up to a budget** and compute exact attention over them. The rest is dropped, so the result is slightly biased.
 7. **Update incrementally.** Each new key joins its nearest centroid when it leaves the recent window, at the cost of one comparison with the centroids. The centroids are not refitted during generation.
 
-In the code this is `voronoi_fused` (Triton kernels) with `partition="kmeans"`, the default. Until October 2026 the clusters came from 256 fixed random directions instead of fitted centroids (`partition="random"`); fitting them lowers next-token error by 23–28% at equal reads and equal speed.
+In the code this is `cluster_fused` (Triton kernels) with `partition="kmeans"`, the default. Until October 2026 the clusters came from 256 fixed random directions instead of fitted centroids (`partition="random"`); fitting them lowers next-token error by 23–28% at equal reads and equal speed.
 
 ## Status (October 2026)
 

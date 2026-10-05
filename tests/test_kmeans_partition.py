@@ -66,7 +66,7 @@ def test_engine_op_with_fitted_centroids_is_exact_at_full_budget():
             return torch.stack([model(ids[:, t:t + 1], cache)[0, -1].float() for t in range(150, 170)])
 
     ref = decode()
-    install(model, "voronoi_tail", budget=1.0, order="drop", partition="kmeans", C=16, window=4, capacity=256)
+    install(model, "cluster_tail", budget=1.0, order="drop", partition="kmeans", C=16, window=4, capacity=256)
     got = decode()
     uninstall(model)
     torch.testing.assert_close(got, ref, rtol=1e-3, atol=1e-3)
@@ -85,6 +85,6 @@ def test_older_sweep_presets_pin_random_directions():
     from ssa.harness.ppl_sweep import CONDITION_PRESETS
     for name in ("fused_hi", "sphere_fused_refs", "sample_grid", "tail", "tail_conv"):
         for impl, cfg in CONDITION_PRESETS[name]:
-            if impl in ("voronoi_fused", "voronoi_tail", "voronoi_sample"):
+            if impl in ("cluster_fused", "cluster_tail", "cluster_tail_sample"):
                 assert cfg.get("partition") == "random", (name, impl)
     assert all(c.get("partition") == "kmeans" for i, c in CONDITION_PRESETS["fused_kmeans"] if i != "dense")

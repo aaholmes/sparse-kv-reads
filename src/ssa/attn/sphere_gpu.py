@@ -1,4 +1,4 @@
-"""Batched GPU bin index for `voronoi_skip`.
+"""Batched GPU bin index for `cluster_skip`.
 
 One instance per layer. Holds every KV head's hypersphere bins as batched tensors and
 produces the Triton kernel's inputs (``labels [H_kv, n]`` int16 and per-bin weights ``w``)

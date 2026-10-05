@@ -1,7 +1,7 @@
 """Plot fidelity versus reads: TVD from exact vs percent of K+V rows read.
 
 Reads one or more stamped ``tvd_*.json`` files (from ``ssa.harness.accept_sweep``),
-keeps ``voronoi_skip`` and ``voronoi_tail`` (skipped regions estimated; its drop control
+keeps ``cluster_skip`` and ``cluster_tail`` (skipped regions estimated; its drop control
 is left out) at one region count and ``santa_sys``, and draws each with its
 95% bootstrap CI over chunks. Lower-left is better (fewer reads, closer to exact).
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from ..attn import canonical
 
-LABELS = {"fitted": "this method", "voronoi_skip": "fixed random directions",
-          "voronoi_tail": "fixed random directions + tail estimate", "santa_sys": "systematic sampling"}
+LABELS = {"fitted": "this method", "cluster_skip": "fixed random directions",
+          "cluster_tail": "fixed random directions + tail estimate", "santa_sys": "systematic sampling"}
 
 
 def build_series(paths, regions: int = 256, only=None) -> dict[str, dict[str, list[float]]]:
@@ -28,15 +28,15 @@ def build_series(paths, regions: int = 256, only=None) -> dict[str, dict[str, li
     for p in paths:
         for r in json.loads(Path(p).read_text())["summary"]:
             impl = canonical(r["impl"])
-            if impl == "voronoi_fused":
+            if impl == "cluster_fused":
                 if r["cfg"].get("partition") != "kmeans" or r["cfg"].get("C") != regions:
                     continue
                 impl = "fitted"
             if impl not in rows or "tvd_ci" not in r:
                 continue
-            if impl in ("voronoi_skip", "voronoi_tail") and r["cfg"].get("C") != regions:
+            if impl in ("cluster_skip", "cluster_tail") and r["cfg"].get("C") != regions:
                 continue
-            if impl == "voronoi_tail" and r["cfg"].get("order") == "drop":       # matched control, not a series
+            if impl == "cluster_tail" and r["cfg"].get("order") == "drop":       # matched control, not a series
                 continue
             lo, hi = r["tvd_ci"]
             rows[impl].append((round(100 * r["kv_read_fraction"], 1), r["tvd"], lo, hi))
@@ -62,7 +62,7 @@ def plot_series(series, out) -> None:
 
     plt.rcParams.update({"font.size": 11, "axes.spines.top": False, "axes.spines.right": False})
     fig, ax = plt.subplots(figsize=(4.4, 3.3), dpi=200)
-    style = {"fitted": ("#1f5fbf", "o", "-"), "voronoi_skip": ("#7f8c8d", "D", "-"), "voronoi_tail": ("#2a9d8f", "^", "--"),
+    style = {"fitted": ("#1f5fbf", "o", "-"), "cluster_skip": ("#7f8c8d", "D", "-"), "cluster_tail": ("#2a9d8f", "^", "--"),
              "santa_sys": ("#c0392b", "s", "none")}
     for impl, s in series.items():
         if not s["x"]:
@@ -76,7 +76,7 @@ def plot_series(series, out) -> None:
     ax.set_xlim(0, None)
     ax.set_ylim(0, None)
     ax.grid(axis="y", alpha=0.2)
-    ax.legend(frameon=False, loc="lower left" if series.get("fitted", {}).get("x") else "upper right", fontsize=9 if series.get("voronoi_tail", {}).get("x") else None)
+    ax.legend(frameon=False, loc="lower left" if series.get("fitted", {}).get("x") else "upper right", fontsize=9 if series.get("cluster_tail", {}).get("x") else None)
     fig.tight_layout()
     fig.savefig(out)
     plt.close(fig)
@@ -87,7 +87,7 @@ def main() -> None:
     ap.add_argument("paths", nargs="+")
     ap.add_argument("--regions", type=int, default=256)
     ap.add_argument("--out", default="tvd.png")
-    ap.add_argument("--only", nargs="+", default=None, help="series to draw (fitted, voronoi_skip, voronoi_tail, santa_sys)")
+    ap.add_argument("--only", nargs="+", default=None, help="series to draw (fitted, cluster_skip, cluster_tail, santa_sys)")
     args = ap.parse_args()
     plot_series(build_series(args.paths, args.regions, args.only), args.out)
 

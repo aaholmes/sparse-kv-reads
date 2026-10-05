@@ -1,4 +1,4 @@
-"""Partition comparison for `voronoi_skip`: captured mass vs key budget.
+"""Partition comparison for `cluster_skip`: captured mass vs key budget.
 
 For each query, token 0 and the last ``window`` keys form the exact set; the rest are
 grouped by a partition, regions are ranked by mean direction × max/min length, and
