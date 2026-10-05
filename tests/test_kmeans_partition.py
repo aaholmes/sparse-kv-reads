@@ -1,0 +1,79 @@
+"""`SphereIndexGPU(partition="kmeans")`: centroids fitted once on the prompt, then kept."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+import torch
+
+from ssa.attn.sphere_gpu import SphereIndexGPU
+from ssa.harness.partition_ablation import select
+from ssa.models.patch import install, uninstall
+from _fixtures import Geom, make_qkv
+from _tiny_model import TinyCfg, tiny_model
+
+C, W = 16, 8
+
+
+def _qkv(n=500, seed=0):
+    q, K, V = make_qkv(Geom(H=8, H_kv=2, d=16, n_k=n), seed=seed)
+    return q, K.permute(1, 0, 2).contiguous() + 1.5, V.permute(1, 0, 2).contiguous()
+
+
+def test_first_build_matches_the_ablation_reference():
+    q, K, _ = _qkv()
+    n = 400
+    idx = SphereIndexGPU(C=C, window=W, delta=math.inf, capacity=500, partition="kmeans")
+    idx.observe(K, n)
+    lab, w = idx.labels_and_weights(q, n=n, budget=0.2)
+    lab_ref, w_ref, _ = select(q, K, n=n, budget=0.2, partition="kmeans", center=True, score="length", C=C, window=W)
+    assert torch.equal(lab.long(), lab_ref)
+    torch.testing.assert_close(w, w_ref)
+
+
+def test_new_keys_join_the_nearest_fitted_centroid_and_centroids_stay_fixed():
+    q, K, _ = _qkv(seed=1)
+    idx = SphereIndexGPU(C=C, window=W, delta=math.inf, capacity=500, partition="kmeans")
+    idx.observe(K, 400)
+    cent = idx.cent.clone()
+    for n in range(401, 480, 7):
+        idx.observe(K, n)
+    assert torch.equal(idx.cent, cent)
+    Kr = K[:, 392:idx.end] - idx.mu_ref.unsqueeze(1)                      # keys binned after the fit
+    nearest = torch.einsum("hmd,hcd->hmc", torch.nn.functional.normalize(Kr, dim=-1), cent).argmax(-1)
+    assert torch.equal(idx.labels[:, 392:idx.end].long(), nearest)
+
+
+def test_random_partition_is_unchanged_by_default():
+    q, K, _ = _qkv(seed=2)
+    a = SphereIndexGPU(C=C, window=W, delta=math.inf, capacity=500)
+    b = SphereIndexGPU(C=C, window=W, delta=math.inf, capacity=500, partition="random")
+    a.observe(K, 400)
+    b.observe(K, 400)
+    assert torch.equal(a.labels, b.labels)
+
+
+@pytest.mark.requires_cuda
+def test_fused_kernels_reject_fitted_centroids_for_now():
+    from ssa.kernels.sphere_fused import SphereIndexFused
+    with pytest.raises(NotImplementedError):
+        SphereIndexFused(C=C, window=W, capacity=500, partition="kmeans")
+
+
+def test_engine_op_with_fitted_centroids_is_exact_at_full_budget():
+    cfg = TinyCfg(head_dim=16, max_position_embeddings=256, num_attention_heads=4, num_key_value_heads=2)
+    model = tiny_model(cfg).eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, 170), generator=torch.Generator().manual_seed(0))
+
+    def decode():
+        cache = model.alloc_cache(171)
+        with torch.inference_mode():
+            model(ids[:, :150], cache, start_pos=0)
+            return torch.stack([model(ids[:, t:t + 1], cache)[0, -1].float() for t in range(150, 170)])
+
+    ref = decode()
+    install(model, "voronoi_tail", budget=1.0, order="drop", partition="kmeans", C=16, window=4, capacity=256)
+    got = decode()
+    uninstall(model)
+    torch.testing.assert_close(got, ref, rtol=1e-3, atol=1e-3)

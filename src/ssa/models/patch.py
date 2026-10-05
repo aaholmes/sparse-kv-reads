@@ -122,7 +122,8 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
         from ..attn.tail_estimate import SphereIndexTail
         tail = SphereIndexTail(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
                                delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
-                               check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)))
+                               check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)),
+                               partition=cfg.get("partition", "random"))
 
     def op(q, full_k, full_v, *, scale, layer_idx):
         qd = q[0, :, 0, :]                          # [H, d]

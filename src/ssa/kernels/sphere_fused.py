@@ -142,6 +142,9 @@ class SphereIndexFused(SphereIndexGPU):
 
     def __init__(self, *args, async_check: bool = True, **kw):
         super().__init__(*args, **kw)
+        if self.partition != "random":
+            raise NotImplementedError("the Triton kernels use one shared set of directions; "
+                                      "fitted per-head centroids run only in SphereIndexGPU for now")
         self.async_check = async_check
 
     def _bc(self) -> int:

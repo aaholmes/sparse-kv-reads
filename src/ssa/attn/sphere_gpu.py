@@ -9,6 +9,11 @@ recent window, centered with ``μ_ref``; a KV head is recentered and rebinned wh
 mean has moved more than ``δ · r̄``. The drift flags are computed on the GPU every step and
 read on the host every ``check_every`` steps (``check_every=1`` reproduces ``SphereState``).
 Pure PyTorch, so it runs on CPU as well.
+
+``partition="random"`` (default) assigns each key to the nearest of ``C`` fixed random directions
+shared by all heads. ``partition="kmeans"`` fits ``C`` centroids per KV head by cosine k-means on
+the centered keys at the first build (the end of the prompt) and keeps them: later keys join the
+nearest centroid, and recentering rebins with the centroids unchanged.
 """
 
 from __future__ import annotations
@@ -25,7 +30,11 @@ GROUPS = ("per_head", "max", "max_rel", "sum_share")
 
 class SphereIndexGPU:
     def __init__(self, *, C: int = 256, window: int = 64, delta: float = 0.03, capacity: int = 65536,
-                 check_every: int = 16, seed: int = 0, kind: str = "random"):
+                 check_every: int = 16, seed: int = 0, kind: str = "random", partition: str = "random",
+                 kmeans_iters: int = 10):
+        if partition not in ("random", "kmeans"):
+            raise ValueError(f"unknown partition {partition!r}")
+        self.partition, self.kmeans_iters = partition, kmeans_iters
         self.C, self.window, self.delta, self.capacity = C, window, delta, capacity
         self.check_every, self.seed, self.kind = check_every, seed, kind
         self.initialized = False
@@ -41,6 +50,8 @@ class SphereIndexGPU:
         C = self.C
         kw = dict(dtype=dtype, device=device)
         self.dirs = fixed_directions(C, d, seed=self.seed, kind=self.kind, dtype=dtype, device=device)
+        self.cent = torch.zeros(H_kv, C, d, **kw) if self.partition == "kmeans" else None
+        self.fitted = torch.zeros(H_kv, dtype=torch.bool, device=device)
         self.sum_dir = torch.zeros(H_kv, C, d, **kw)
         self.mmax = torch.zeros(H_kv, C, **kw)
         self.mmin = torch.full((H_kv, C), math.inf, **kw)
@@ -57,7 +68,10 @@ class SphereIndexGPU:
         h, m, d = Kr.shape
         mag = Kr.norm(dim=-1)                                              # [h, m]
         Kn = Kr / mag.clamp_min(1e-12).unsqueeze(-1)
-        lab = (Kn @ self.dirs.t()).argmax(-1)                              # [h, m]
+        if self.partition == "kmeans":
+            lab = torch.einsum("hmd,hcd->hmc", Kn, self.cent[heads]).argmax(-1)
+        else:
+            lab = (Kn @ self.dirs.t()).argmax(-1)                          # [h, m]
         flat = (lab + heads.unsqueeze(1) * self.C).reshape(-1)
         self.sum_dir.view(-1, d).index_add_(0, flat, Kn.reshape(-1, d))
         self.mmax.view(-1).scatter_reduce_(0, flat, mag.reshape(-1), reduce="amax")
@@ -79,6 +93,13 @@ class SphereIndexGPU:
         self.ksum[heads] = Kb.sum(1)
         if nb:
             Kr = Kb - mu.unsqueeze(1)
+            if self.partition == "kmeans":                                 # fit once per head, then keep
+                todo = ~self.fitted[heads]
+                if todo.any():
+                    from .clusterkv import spherical_kmeans
+                    _, cent = spherical_kmeans(Kr[todo], C=self.C, iters=self.kmeans_iters, seed=self.seed)
+                    self.cent[heads[todo]] = cent
+                    self.fitted[heads[todo]] = True
             self.rbar[heads] = Kr.pow(2).sum(-1).mean(1).sqrt()
             self.labels[heads, self.start:self.end] = self._bin(Kr, heads).to(torch.int16)
         else:
@@ -97,6 +118,9 @@ class SphereIndexGPU:
     def _advance(self, K: torch.Tensor, n: int) -> None:
         new_end = max(1, n - self.window)
         heads = torch.arange(self.H_kv, device=self.device)
+        if self.partition == "kmeans" and new_end > self.end and not bool(self.fitted.all()):
+            self.end = new_end                                             # nothing was binned at the first build
+            self._build(K, heads, None)
         if new_end > self.end:
             Kn = K[:, self.end:new_end].to(self.dtype)                     # [H_kv, m, d]
             self.ksum += Kn.sum(1)
