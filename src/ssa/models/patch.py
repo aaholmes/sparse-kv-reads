@@ -20,6 +20,7 @@ import torch
 from engine.attention import Attention
 
 from ..attn import attn, canonical
+from ..attn.accounting import overhead_rows
 from ..sampling.draws import unique_counts
 
 _SAMPLING_IMPLS = {"santa", "santa_strat", "santa_sys", "santa_hybrid", "skip_k"}
@@ -115,7 +116,9 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
                                  delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
                                  check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)),
                                  partition=cfg.get("partition", "kmeans"), C_init=cfg.get("C_init"),
-                                 split_factor=float(cfg.get("split_factor", 0.0)))
+                                 split_factor=float(cfg.get("split_factor", 0.0)),
+                                 summary_bits=int(cfg.get("summary_bits", 8)),
+                                 cap_keys=float(cfg.get("cap_keys", 0.0)))
         track = bool(cfg.get("track_reads", True))
         fused_prev = {"rebuilds": 0, "head_steps": 0}
 
@@ -179,7 +182,10 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
                 wk = w if w.shape[0] == Kc.shape[0] else w.view(Kc.shape[0], -1, w.shape[1]).amax(1)
                 rows = (torch.gather(wk, 1, labels.long()) > 0).sum(1).float()        # [H_kv]
                 stats.record_gpu(n_k=n_k, reads_mean=rows.mean(),
-                                 kv_rows=2 * rows.mean() + fused.n_c.float().mean() * (1 + 2 / qd.shape[1]))
+                                 kv_rows=2 * rows.mean() + overhead_rows(
+                                     n=n_k, rows=rows.mean(), clusters=fused.n_c.float().mean(), d=qd.shape[1],
+                                     summary_bits=fused.summary_bits, fitted=fused.partition == "kmeans",
+                                     heads=Kc.shape[0]))
                 stats.rebuilds += fused.rebuilds - fused_prev["rebuilds"]      # summed over layers
                 stats.head_steps += fused.head_steps - fused_prev["head_steps"]
                 fused_prev["rebuilds"], fused_prev["head_steps"] = fused.rebuilds, fused.head_steps

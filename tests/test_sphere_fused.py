@@ -25,7 +25,7 @@ def _stream(n, seed=0):
 def _pair(delta, check_every=1, async_check=False):
     from ssa.kernels.sphere_fused import SphereIndexFused
     kw = dict(C=C, window=W, delta=delta, capacity=4096, check_every=check_every)
-    return SphereIndexGPU(**kw), SphereIndexFused(**kw, async_check=async_check)
+    return SphereIndexGPU(**kw), SphereIndexFused(**kw, async_check=async_check, summary_bits=32)
 
 
 def test_binning_matches_torch_index():

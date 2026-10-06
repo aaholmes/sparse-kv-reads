@@ -183,7 +183,22 @@ FUSED_KMEANS_CONDITIONS = [("dense", {})] + [(i, {**c, "partition": "kmeans"})
 QUANT8_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 8})]
 QUANT4_CONDITIONS = [("dense", {}), ("quant", {"n_bits": 4, "group_size": 128})]
 
-CONDITION_PRESETS = {"full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
+# The README's results with the current kernels (fitted clusters, 8-bit cluster vectors, every byte
+# counted): the headline budgets with and without splitting, and for other models and contexts the
+# budgets plus sampling of the unselected clusters (compared at matched reads).
+def _fk(b, **kw):
+    return ("cluster_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+                             "check_every": 16, "partition": "kmeans", **kw})
+
+
+REPORT_8K_CONDITIONS = ([("dense", {})] + [_fk(b) for b in (0.05, 0.1, 0.2, 0.4)]
+                        + [_fk(b, C=512, C_init=256, split_factor=2.0) for b in (0.05, 0.1, 0.2, 0.4)])
+REPORT_LONG_CONDITIONS = ([("dense", {})] + [_fk(b) for b in (0.05, 0.1, 0.15, 0.2, 0.3)]
+                          + [(i, {**c, "partition": "kmeans"})
+                             for i, c in (_sample(h, S, 0.5) for h in (0.1, 0.2) for S in (8, 32))])
+
+CONDITION_PRESETS = {"report_8k": REPORT_8K_CONDITIONS, "report_long": REPORT_LONG_CONDITIONS,
+                     "full": DEFAULT_CONDITIONS, "cheap": CHEAP_CONDITIONS,
                      "skipk": SKIPK_CONDITIONS, "sphere": SPHERE_CONDITIONS,
                      "sphere_shared": SPHERE_SHARED_CONDITIONS,
                      "sphere_shared_8k": SPHERE_SHARED_8K_CONDITIONS,

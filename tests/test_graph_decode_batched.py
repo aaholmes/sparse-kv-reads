@@ -63,3 +63,10 @@ def test_flashinfer_batch_matches_separate_runs(capture):
     together = _run(model, ids, "flashinfer", capture, {}, torch.bfloat16)
     apart = torch.cat([_run(model, ids[i:i + 1], "flashinfer", capture, {}, torch.bfloat16) for i in range(B)])
     assert (together - apart).abs().max() < 0.01 * apart.abs().max()       # bf16: batch shapes change matmul rounding
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_batch_with_splitting_matches_separate_runs(capture):
+    cfg = dict(budget=0.3, C=64, C_init=16, split_factor=2.0, window=4, delta=float("inf"), check_every=4)
+    together, apart = _batched_vs_separate("cluster", capture, cfg, torch.float32, model_seed=2)
+    torch.testing.assert_close(together, apart, rtol=1e-3, atol=1e-3)

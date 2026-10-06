@@ -1,0 +1,29 @@
+{
+ "256": {
+  "clusters": 256.0,
+  "_bin_dev_kernel": 0.2533949999999769,
+  "_score_kernel": 0.2754805208334137,
+  "_pick_dev_kernel": 0.15347941666667717,
+  "_compact_dev_kernel": 0.10570777083335729,
+  "_list_kernel": 1.327009541666628,
+  "all_gpu_ms": 24.795375000000078
+ },
+ "1024": {
+  "clusters": 1024.0,
+  "_bin_dev_kernel": 0.6216799583333386,
+  "_score_kernel": 0.8077880624999925,
+  "_pick_dev_kernel": 0.8656782916667244,
+  "_compact_dev_kernel": 0.10748125000005945,
+  "_list_kernel": 1.3322666874999627,
+  "all_gpu_ms": 26.436153625000387
+ },
+ "1024 in 2048 slots": {
+  "clusters": 1024.0,
+  "_bin_dev_kernel": 0.6249915833333463,
+  "_score_kernel": 0.8096036250000389,
+  "_pick_dev_kernel": 0.8402264166665996,
+  "_compact_dev_kernel": 0.10797402083332273,
+  "_list_kernel": 1.3384747916666646,
+  "all_gpu_ms": 26.44989300000022
+ }
+}

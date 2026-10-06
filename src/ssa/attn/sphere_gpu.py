@@ -25,6 +25,10 @@ when 2-means would leave a half with under a quarter of the keys, the cluster is
 of the keys' projections on the line between the two centroids instead. New clusters take spare
 slots, and splitting stops when none are left. Clusters are never merged (a v2 question).
 
+``cap_keys`` sets the cap as an absolute number of keys instead, so that the cluster size, and
+with it the cluster count at a given context length, does not depend on how long the prompt was
+(``split_factor``, 2 by default then, remains the ratio of the cap to the size the fit aims for).
+
 Two ways to bound the cluster count, which otherwise grows in proportion to the context:
 ``grow_cap`` makes the cap ``split_factor ×`` the current mean size of ``C_init`` clusters, so a
 cluster splits only when it holds more than that multiple of its share of the keys; ``reset_at``
@@ -104,12 +108,13 @@ class SphereIndexGPU:
     def __init__(self, *, C: int = 256, window: int = 64, delta: float = 0.03, capacity: int = 65536,
                  check_every: int = 16, seed: int = 0, kind: str = "random", partition: str = "random",
                  kmeans_iters: int = 10, C_init: int | None = None, split_factor: float = 0.0,
-                 grow_cap: bool = False, reset_at: int = 0):
+                 grow_cap: bool = False, reset_at: int = 0, cap_keys: float = 0.0):
         if partition not in ("random", "kmeans"):
             raise ValueError(f"unknown partition {partition!r}")
         self.partition, self.kmeans_iters = partition, kmeans_iters
         self.C_init = C if C_init is None else C_init
-        self.split_factor = float(split_factor)
+        self.cap_keys = float(cap_keys)         # absolute cap in keys (0: split_factor × mean size at the fit)
+        self.split_factor = float(split_factor) if split_factor or not cap_keys else 2.0
         if self.C_init > C or (self.split_factor > 0 and partition != "kmeans"):
             raise ValueError("C_init must be <= C, and splitting needs partition='kmeans'")
         self.splits = 0
@@ -192,7 +197,7 @@ class SphereIndexGPU:
                     self.n_c[heads[todo]] = self.C_init
                     self.fitted[heads[todo]] = True
                     if self.split_factor > 0:
-                        self.cap[heads[todo]] = self.split_factor * nb / self.C_init
+                        self.cap[heads[todo]] = self.cap_keys or self.split_factor * nb / self.C_init
                         self._fresh_fit = True
             self.rbar[heads] = Kr.pow(2).sum(-1).mean(1).sqrt()
             self.labels[heads, self.start:self.end] = self._bin(Kr, heads).to(torch.int16)

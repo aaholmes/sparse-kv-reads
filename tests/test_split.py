@@ -191,3 +191,19 @@ def test_reset_refits_a_head_once_its_cluster_count_has_doubled():
     s = torch.einsum("hd,hnd->hn", q, K[:, :2990].repeat_interleave(G, 0)) / math.sqrt(q.shape[1])
     dense = torch.einsum("hn,hnd->hd", torch.softmax(s, -1), V[:, :2990].repeat_interleave(G, 0))
     torch.testing.assert_close(label_weighted_attention(q, K[:, :2990], V[:, :2990], labels, w), dense, rtol=1e-10, atol=1e-10)
+
+
+def test_an_absolute_cap_does_not_depend_on_the_prompt_length():
+    q, K, V = _qkv(n=2000, seed=8)
+    kw = {**KW, "C": 256, "capacity": 2100, "split_factor": 0.0, "cap_keys": 24}
+    short, long = SphereIndexGPU(**kw), SphereIndexGPU(**kw)
+    short.observe(K, 200)
+    long.observe(K, 1500)
+    assert torch.all(short.cap == 24) and torch.all(long.cap == 24)
+    assert torch.all(long.count <= 24) and long.splits > 0               # 1,492 keys in 16 clusters: split at the fit
+    for n in range(210, 1500, 10):
+        short.observe(K, n)
+    assert torch.all(short.count <= 24 + 10)
+    assert (short.n_c.float().mean() / long.n_c.float().mean() - 1).abs() < 0.35   # similar counts at equal context
+    cnt, sd, mx, mn = _recount(short, K)
+    torch.testing.assert_close(short.count, cnt)

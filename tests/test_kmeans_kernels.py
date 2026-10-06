@@ -26,7 +26,7 @@ def test_fused_binning_and_selection_match_the_torch_index_with_fitted_centroids
     from ssa.kernels.sphere_fused import SphereIndexFused
     Q, K = _stream(1400)
     kw = dict(C=C, window=W, delta=math.inf, capacity=4096, check_every=1, partition="kmeans")
-    ref, fus = SphereIndexGPU(**kw), SphereIndexFused(**kw, async_check=False)
+    ref, fus = SphereIndexGPU(**kw), SphereIndexFused(**kw, async_check=False, summary_bits=32)
     for n in range(1000, 1400, 3):
         ref.observe(K, n)
         fus.observe(K, n)

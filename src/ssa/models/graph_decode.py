@@ -28,7 +28,8 @@ from ..kernels.graph_kernels import DenseAttentionGraph, SphereIndexGraph
 
 class GraphDecoder:
     def __init__(self, model, cache, *, mode: str = "dense", budget: float = 0.2, C: int = 256,
-                 window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", C_init: int | None = None, split_factor: float = 0.0, refit_every: int = 0, grow_cap: bool = False, reset_at: int = 0, **_):
+                 window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", C_init: int | None = None, split_factor: float = 0.0, refit_every: int = 0, grow_cap: bool = False, reset_at: int = 0,
+                 summary_bits: int = 8, cap_keys: float = 0.0, **_):
         cfg = model.cfg
         self.model, self.cache, self.mode = model, cache, mode
         self.H, self.H_kv, self.d = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
@@ -53,7 +54,8 @@ class GraphDecoder:
             self.attn = [SphereIndexGraph(budget=budget, C=C, window=window, delta=delta, capacity=cap,
                                           check_every=check_every, partition=partition, C_init=C_init,
                                           split_factor=split_factor, refit_every=refit_every, grow_cap=grow_cap,
-                                          reset_at=reset_at) for _ in model.layers]
+                                          reset_at=reset_at, summary_bits=summary_bits,
+                                          cap_keys=cap_keys) for _ in model.layers]
         else:
             raise ValueError(f"unknown mode {mode!r}")
         self.graph = None

@@ -46,14 +46,17 @@ def _member_block(k_ptr, s_kh, s_kn, mem_ptr, mu, h, j0, m, D: tl.constexpr, MS:
 
 
 @triton.jit
-def _split_cluster(k_ptr, s_kh, s_kn, cent_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
-                   lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, c, new, stop,
-                   C: tl.constexpr, D: tl.constexpr, MS: tl.constexpr, BL: tl.constexpr, BM: tl.constexpr):
+def _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr, mmin_ptr,
+                   cnt_ptr, mu, lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, c, new, stop,
+                   C: tl.constexpr, D: tl.constexpr, MS: tl.constexpr, BL: tl.constexpr, BM: tl.constexpr,
+                   Q8: tl.constexpr):
     """Split cluster ``c`` of head ``h`` in two, the second half taking slot ``new``; the rule is
     ``ssa.attn.sphere_gpu._bisect_padded``'s. Scans the head's labels ``[1, stop)`` for the
     members, runs 2-means on their directions (from the first member and the one farthest from
     it), cuts at the median projection on the line between the two centroids when a half would
-    hold under a quarter of the members, then rewrites both summaries, centroids and labels."""
+    hold under a quarter of the members, then rewrites both summaries, centroids and labels.
+    ``cent_ptr`` holds the float32 centroids; with ``Q8``, ``dirs_ptr`` and ``qdir_ptr`` hold the
+    8-bit centroids and mean directions."""
     offs_d = tl.arange(0, D)
     offs_l = tl.arange(0, BL)
     offs_b = tl.arange(0, BM)
@@ -146,17 +149,29 @@ def _split_cluster(k_ptr, s_kh, s_kn, cent_ptr, s_dh, nact_ptr, sumdir_ptr, mmax
     tl.store(mmin_ptr + r1, y1)
     tl.store(cnt_ptr + r0, mf - n1)
     tl.store(cnt_ptr + r1, n1)
-    tl.store(cent_ptr + h * s_dh + c * D + offs_d, s0 / tl.maximum(tl.sqrt(tl.sum(s0 * s0, axis=0)), 1e-12))
-    tl.store(cent_ptr + h * s_dh + new * D + offs_d, s1 / tl.maximum(tl.sqrt(tl.sum(s1 * s1, axis=0)), 1e-12))
+    u0 = s0 / tl.maximum(tl.sqrt(tl.sum(s0 * s0, axis=0)), 1e-12)
+    u1 = s1 / tl.maximum(tl.sqrt(tl.sum(s1 * s1, axis=0)), 1e-12)
+    tl.store(cent_ptr + h * s_dh + c * D + offs_d, u0)
+    tl.store(cent_ptr + h * s_dh + new * D + offs_d, u1)
+    if Q8:                                                                # the 8-bit copies the per-step reads use
+        b0 = tl.floor(u0 * 127.0 + 0.5).to(tl.int8)
+        b1 = tl.floor(u1 * 127.0 + 0.5).to(tl.int8)
+        tl.store(dirs_ptr + h * s_dh + c * D + offs_d, b0)
+        tl.store(dirs_ptr + h * s_dh + new * D + offs_d, b1)
+        tl.store(qdir_ptr + r0 * D + offs_d, b0)
+        tl.store(qdir_ptr + r1 * D + offs_d, b1)
     tl.store(nact_ptr + h, (new + 1).to(tl.int64))
-    tl.store(nsplit_ptr + h, tl.load(nsplit_ptr + h) + 1)
+    done = tl.load(nsplit_ptr + h) + 1
+    tl.debug_barrier()                                                    # all threads read before any writes
+    tl.store(nsplit_ptr + h, done)
     tl.debug_barrier()
 
 
 @triton.jit
-def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
+def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
                 rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, start, stop, nbinned,
-                delta, capk, reset_at, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
+                delta, capk, reset_at, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr,
+                Q8: tl.constexpr):
     h = tl.program_id(0)
     offs_d = tl.arange(0, D)
     mu = tl.load(mu_ptr + h * D + offs_d)
@@ -169,11 +184,12 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_pt
         kr = k - mu
         mag = tl.sqrt(tl.sum(kr * kr, axis=0))
         kn = kr / tl.maximum(mag, 1e-12)
-        best = mag * 0.0 - 2.0                             # below any cosine
+        best = mag * 0.0 - 1000.0                          # below any score
         bi = (mag * 0.0).to(tl.int32)
         for c0 in range(0, n_act, BC):                     # only the blocks of slots in use
             offs_c = c0 + tl.arange(0, BC)
-            dv = tl.load(dirs_ptr + h * s_dh + offs_c[:, None] * D + offs_d[None, :])
+            dv = tl.load(dirs_ptr + h * s_dh + offs_c[:, None] * D + offs_d[None, :]).to(tl.float32)
+            # 8-bit centroids have length 127 to within about 0.3%, so they are compared without normalizing
             sc = tl.where(offs_c < n_act, tl.sum(dv * kn[None, :], axis=1), NEG_INF)
             m = tl.max(sc, axis=0)
             am = tl.argmax(sc, axis=0)
@@ -181,18 +197,25 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_pt
             bi = tl.where(upd, c0 + am, bi)
             best = tl.where(upd, m, best)
         row = h * C + bi
-        sd = tl.load(sumdir_ptr + row * D + offs_d)
-        tl.store(sumdir_ptr + row * D + offs_d, sd + kn)
+        sd = tl.load(sumdir_ptr + row * D + offs_d) + kn
+        tl.store(sumdir_ptr + row * D + offs_d, sd)
+        if Q8:                                             # refresh this cluster's 8-bit mean direction
+            un = sd / tl.maximum(tl.sqrt(tl.sum(sd * sd, axis=0)), 1e-12)
+            tl.store(qdir_ptr + row * D + offs_d, tl.floor(un * 127.0 + 0.5).to(tl.int8))
         tl.store(mmax_ptr + row, tl.maximum(tl.load(mmax_ptr + row), mag))
         tl.store(mmin_ptr + row, tl.minimum(tl.load(mmin_ptr + row), mag))
+        # Every thread of the program evaluates this scalar. The barrier makes them all read the old
+        # count before any writes the new one; otherwise a thread that reads late sees the count
+        # already incremented, and the threads then disagree on whether to split.
         cn = tl.load(cnt_ptr + row) + 1.0
+        tl.debug_barrier()
         tl.store(cnt_ptr + row, cn)
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
         if (cn > tl.maximum(cap, capk * p)) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # over its cap: split it now
-            _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
-                           lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi, n_act, p + 1,
-                           C, D, MS, 1024, 64)
+            _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr,
+                           mmin_ptr, cnt_ptr, mu, lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi,
+                           n_act, p + 1, C, D, MS, 1024, 64, Q8)
             n_act += 1
     tl.store(ksum_ptr + h * D + offs_d, ks)
     mu_t = ks / nbinned
@@ -216,7 +239,7 @@ def _score_kernel(q_ptr, s_qh, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, nact_ptr
         gm = offs_g < G
         offs_d = tl.arange(0, D)
         q = tl.load(q_ptr + (h * G + offs_g)[:, None] * s_qh + offs_d[None, :], mask=gm[:, None], other=0.0)
-        sd = tl.load(sumdir_ptr + (h * C + offs_c)[:, None] * D + offs_d[None, :])            # [BC, D]
+        sd = tl.load(sumdir_ptr + (h * C + offs_c)[:, None] * D + offs_d[None, :]).to(tl.float32)   # [BC, D]
         nrm = tl.maximum(tl.sqrt(tl.sum(sd * sd, axis=1)), 1e-12)
         p = tl.dot(q.to(tl.float32), tl.trans(sd), input_precision="ieee") / nrm[None, :]    # [G_PAD, BC]
         mx = tl.load(mmax_ptr + h * C + offs_c)
@@ -302,9 +325,19 @@ class SphereIndexFused(SphereIndexGPU):
 
     Splitting during decoding happens inside the binning kernel: the program that inserts a key
     into a cluster and takes it past its cap splits that cluster before the step's selection, with
-    no host work. A cluster of more than ``split_scratch`` keys is left alone."""
+    no host work. A cluster of more than ``split_scratch`` keys is left alone.
 
-    def __init__(self, *args, async_check: bool = True, max_lag: int = 2, split_scratch: int = 8192, **kw):
+    ``summary_bits=8`` (default): scoring and the nearest-centroid search, which touch every
+    cluster in use at every step, read 8-bit copies of each cluster's mean direction and centroid
+    (unit vectors × 127, rounded). The float32 direction sums remain the accumulators; a copy is
+    rewritten when its cluster changes. ``summary_bits=32`` reads the float32 vectors."""
+
+    def __init__(self, *args, async_check: bool = True, max_lag: int = 2, split_scratch: int = 8192,
+                 summary_bits: int = 8, **kw):
+        if summary_bits not in (8, 32):
+            raise ValueError("summary_bits must be 8 or 32")
+        self.summary_bits = summary_bits
+        self.dir8 = self.cent8 = None
         self._splits_host = 0
         self.nsplit = None
         super().__init__(*args, **kw)
@@ -335,6 +368,9 @@ class SphereIndexFused(SphereIndexGPU):
         self._proj = torch.zeros(H_kv, ms, dtype=torch.float32, device=device)
         self._side = torch.zeros(H_kv, ms, dtype=torch.int32, device=device)
         self.nsplit = torch.zeros(H_kv, dtype=torch.int32, device=device)
+        if self.summary_bits == 8:
+            self.dir8 = torch.zeros(H_kv, self.C, d, dtype=torch.int8, device=device)
+            self.cent8 = torch.zeros_like(self.dir8) if self.partition == "kmeans" else None
         self._pending = None
         self._w = {}
         self._scratch = None
@@ -343,18 +379,46 @@ class SphereIndexFused(SphereIndexGPU):
         super()._init(K, n)
 
     def _dirs_arg(self):
-        """Directions and their per-head stride for the binning kernels: the shared random
-        directions (stride 0) or each head's fitted centroids."""
-        return (self.cent, self.C * self.d) if self.partition == "kmeans" else (self.dirs, 0)
+        """For the binning kernels: the directions searched for the nearest one, the float32
+        centroids a split rewrites, and their per-head stride. Shared random directions have stride 0."""
+        if self.partition != "kmeans":
+            return self.dirs, self.dirs, 0
+        return (self.cent8 if self.cent8 is not None else self.cent), self.cent, self.C * self.d
+
+    def _qdir(self) -> torch.Tensor:
+        """What scoring reads for each cluster's mean direction."""
+        return self.dir8 if self.dir8 is not None else self.sum_dir
+
+    @staticmethod
+    def _to8(x: torch.Tensor) -> torch.Tensor:
+        return torch.floor(torch.nn.functional.normalize(x, dim=-1) * 127 + 0.5).to(torch.int8)
+
+    def _refresh8(self, heads=None) -> None:
+        """Rewrite the 8-bit copies of ``heads`` (all by default) after host-side changes."""
+        if self.dir8 is None:
+            return
+        sel = slice(None) if heads is None else heads
+        self.dir8[sel] = self._to8(self.sum_dir[sel])
+        if self.cent8 is not None:
+            self.cent8[sel] = self._to8(self.cent[sel])
+
+    def _build(self, K, heads, mu):
+        super()._build(K, heads, mu)
+        self._refresh8(heads)
+
+    def _split_overflow(self, K, cand=None, nmeans=False):
+        super()._split_overflow(K, cand, nmeans)
+        self._refresh8()
 
     def _advance(self, K, n):
         new_end = max(1, n - self.window)
         if new_end > self.end:
             _bin_kernel[(self.H_kv,)](
-                K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
+                K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self._qdir(), self.mmax, self.mmin,
+                self.count,
                 self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
                 self.labels, self.labels.stride(0), self.end, new_end, float(new_end - 1), float(self.delta),
-                float(self.capk), self.reset_at or 2 ** 30, C=self.C, D=self.d, BC=self._bc(), MS=self.MS, num_warps=4)
+                float(self.capk), self.reset_at or 2 ** 30, C=self.C, D=self.d, BC=self._bc(), MS=self.MS, Q8=self.dir8 is not None, num_warps=4)
             self.end = new_end
         self.head_steps += self.H_kv
         if self.end - 1 <= 0:
@@ -418,7 +482,7 @@ class SphereIndexFused(SphereIndexGPU):
         q = q.contiguous()
         bc = self._bc()
         grid = (self.H_kv, self.C // bc)
-        _score_kernel[grid](q, q.stride(0), self.sum_dir, self.mmax, self.mmin, self.count, self.n_c, self._scratch,
+        _score_kernel[grid](q, q.stride(0), self._qdir(), self.mmax, self.mmin, self.count, self.n_c, self._scratch,
                             G=G, G_PAD=G_PAD, C=self.C, D=d, BC=bc, num_warps=4)
         _pick_kernel[grid](self._scratch, self.count, self.n_c, w, w.stride(0), float(need), 1.0 / math.sqrt(d),
                            G=G, G_PAD=G_PAD, C=self.C, BC=bc, PER_HEAD=(group == "per_head"), num_warps=4)
