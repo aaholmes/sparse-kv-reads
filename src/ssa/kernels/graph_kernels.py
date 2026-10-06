@@ -61,7 +61,7 @@ def _dense_dev_kernel(q_ptr, k_ptr, v_ptr, n_ptr, m_out, l_out, a_out, num_split
 
 @triton.jit
 def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                    rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta,
+                    rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta, capk, reset_at,
                     C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
     """Bin the keys that left the recent window since the last call; update this head's
     binned count, budget in keys and drift flag. All lengths read from GPU memory."""
@@ -100,7 +100,7 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mma
         tl.store(cnt_ptr + row, cn)
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-        if (cn > cap) & (n_act < C) & (cn >= 2.0) & (cn <= MS):            # over its cap: split it now
+        if (cn > tl.maximum(cap, capk * p)) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # over its cap: split it now
             _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
                            lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi, n_act, p + 1,
                            C, D, MS, 1024, 64)
@@ -112,7 +112,7 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mma
     mu_t = ks / tl.maximum(nb, 1.0)
     dist = tl.sqrt(tl.sum((mu_t - mu) * (mu_t - mu), axis=0))
     moved = (dist > delta * tl.load(rbar_ptr + h)) & (nb > 0)
-    tl.store(flag_ptr + h, tl.maximum(tl.load(flag_ptr + h), moved.to(tl.int32)))
+    tl.store(flag_ptr + h, tl.load(flag_ptr + h) | moved.to(tl.int32) | ((n_act >= reset_at).to(tl.int32) * 2))
 
 
 @triton.jit
@@ -209,7 +209,7 @@ class SphereIndexGraph(SphereIndexFused):
             K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
             self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
             self.labels, self.labels.stride(0), self.end_dev, self.need_dev, n_dev, self.window, float(self.budget),
-            float(self.delta), C=C, D=d, BC=bc, MS=self.MS, num_warps=4)
+            float(self.delta), float(self.capk), self.reset_at or 2 ** 30, C=C, D=d, BC=bc, MS=self.MS, num_warps=4)
         grid = (H_kv, C // bc)
         _score_kernel[grid](q, q.stride(0), self.sum_dir, self.mmax, self.mmin, self.count, self.n_c, self.scratch,
                             G=self.G, G_PAD=self.G_PAD, C=C, D=d, BC=bc, num_warps=4)

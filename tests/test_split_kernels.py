@@ -186,3 +186,56 @@ def test_periodic_refit_in_the_graph_decoder_is_exact_at_full_budget_and_matches
     fresh.prepare(dec._heads(cache.k[1]), P + T, 4)
     assert torch.equal(fresh.labels[:, :fresh.end], idx.labels[:, :fresh.end])
     torch.testing.assert_close(fresh.count, idx.count)
+
+
+def test_growing_cap_and_reset_in_the_kernels():
+    from ssa.kernels.sphere_fused import SphereIndexFused
+    Q, K = _stream(4000, seed=5)
+    kw = {**KW, "check_every": 4}
+    fixed, grow = SphereIndexFused(**kw), SphereIndexFused(**kw, grow_cap=True)
+    reset = SphereIndexFused(**{**kw, "C": 128}, reset_at=128)
+    for idx in (fixed, grow, reset):
+        idx.observe(K, 1000)
+        for n in range(1001, 4000):
+            idx.observe(K, n)
+            torch.cuda.synchronize()
+    end = grow.end
+    assert torch.all(grow.count <= grow._cap_now().unsqueeze(1))
+    assert grow.n_c.max() < 0.7 * fixed.n_c.min()
+    assert reset.resets >= 1 and torch.all(reset.n_c <= 128)
+    for idx in (grow, reset):
+        counts = torch.stack([torch.bincount(idx.labels[h, 1:end].long(), minlength=idx.C) for h in range(H_KV)])
+        torch.testing.assert_close(idx.count, counts.float())
+        assert torch.all(idx.labels[:, 1:end].long() < idx.n_c.unsqueeze(1))
+
+
+def test_graph_decoder_with_reset_is_exact_at_full_budget():
+    from ssa.models.graph_decode import GraphDecoder
+    cfg = TinyCfg(head_dim=16, max_position_embeddings=1024, num_attention_heads=4, num_key_value_heads=2)
+    P, T = 200, 600
+    model = tiny_model(cfg, seed=6).to("cuda").eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, P + T + 1), device="cuda",
+                        generator=torch.Generator(device="cuda").manual_seed(6))
+
+    def run(mode, **kw):
+        cache = model.alloc_cache(-(-(P + T + 2) // 16) * 16)
+        out = []
+        with torch.inference_mode():
+            model(ids[:, :P], cache, start_pos=0)
+            dec = GraphDecoder(model, cache, mode=mode, **kw)
+            dec.prepare(P)
+            dec.capture()
+            for t in range(P, P + T):
+                out.append(dec.step(ids[:, t:t + 1], t)[0, -1].float().clone())
+                torch.cuda.synchronize()
+        return torch.stack(out), dec
+
+    ref, _ = run("dense")
+    got, dec = run("cluster", budget=1.0, C=32, C_init=16, split_factor=2.0, reset_at=32, window=4,
+                   delta=float("inf"), check_every=4)
+    torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+    assert sum(i.resets for i in dec.attn) > 0
+    got, dec = run("cluster", budget=1.0, C=64, C_init=16, split_factor=2.0, grow_cap=True, window=4,
+                   delta=float("inf"), check_every=4)
+    torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+    assert all(int(i.n_c.max()) < 48 for i in dec.attn)

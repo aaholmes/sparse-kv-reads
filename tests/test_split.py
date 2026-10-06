@@ -154,3 +154,40 @@ def test_later_splits_are_few_and_only_follow_overflow():
         idx.observe(K, n)
     assert idx.splits - s0 <= 2 * 2 * 199 / float(idx.cap.min())       # at most ~one split per cap/2 new keys per head
     assert torch.all(idx.count <= idx.cap.unsqueeze(1))
+
+
+def test_a_cap_that_grows_with_the_context_keeps_the_cluster_count_bounded():
+    q, K, V = _qkv(n=3000, seed=6)
+    kw = {**KW, "C": 256, "capacity": 3100}
+    fixed, grow = SphereIndexGPU(**kw), SphereIndexGPU(**kw, grow_cap=True)
+    for idx in (fixed, grow):
+        idx.observe(K, 500)
+        for n in range(510, 3000, 10):
+            idx.observe(K, n)
+    assert torch.all(grow._cap_now() > 5 * grow.cap)                         # six times the keys of the fit
+    assert torch.all(grow.count <= grow._cap_now().unsqueeze(1) + 10)
+    assert torch.all(grow.n_c <= 3 * 16) and torch.all(fixed.n_c > 4 * 16)
+    cnt, sd, mx, mn = _recount(grow, K)
+    torch.testing.assert_close(grow.count, cnt)
+
+
+def test_reset_refits_a_head_once_its_cluster_count_has_doubled():
+    q, K, V = _qkv(n=3000, seed=7)
+    idx = SphereIndexGPU(**{**KW, "C": 32, "capacity": 3100}, reset_at=32)
+    idx.observe(K, 500)
+    cap0 = idx.cap.clone()
+    seen = 0
+    for n in range(510, 3000, 10):
+        idx.observe(K, n)
+        seen = max(seen, int(idx.n_c.max()))
+        assert torch.all(idx.n_c < 32)                                       # a head at the limit is refitted in that step
+    assert idx.resets >= 2 and seen >= 28
+    assert torch.all(idx.cap > cap0)                                         # the cap is set again from the keys at the reset
+    cnt, sd, mx, mn = _recount(idx, K)
+    torch.testing.assert_close(idx.count, cnt)
+    torch.testing.assert_close(idx.sum_dir, sd, rtol=1e-9, atol=1e-9)
+    labels, w = idx.labels_and_weights(q, n=2990, budget=1.0)
+    G = q.shape[0] // K.shape[0]
+    s = torch.einsum("hd,hnd->hn", q, K[:, :2990].repeat_interleave(G, 0)) / math.sqrt(q.shape[1])
+    dense = torch.einsum("hn,hnd->hd", torch.softmax(s, -1), V[:, :2990].repeat_interleave(G, 0))
+    torch.testing.assert_close(label_weighted_attention(q, K[:, :2990], V[:, :2990], labels, w), dense, rtol=1e-10, atol=1e-10)

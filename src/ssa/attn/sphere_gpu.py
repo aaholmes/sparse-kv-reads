@@ -24,6 +24,11 @@ received a key is tested, and one over the cap is split in two by 2-means on its
 when 2-means would leave a half with under a quarter of the keys, the cluster is cut at the median
 of the keys' projections on the line between the two centroids instead. New clusters take spare
 slots, and splitting stops when none are left. Clusters are never merged (a v2 question).
+
+Two ways to bound the cluster count, which otherwise grows in proportion to the context:
+``grow_cap`` makes the cap ``split_factor ×`` the current mean size of ``C_init`` clusters, so a
+cluster splits only when it holds more than that multiple of its share of the keys; ``reset_at``
+refits a head from all its keys, back to ``C_init`` clusters, when its count reaches that number.
 """
 
 from __future__ import annotations
@@ -98,7 +103,8 @@ def bisect_directions(Xn: torch.Tensor):
 class SphereIndexGPU:
     def __init__(self, *, C: int = 256, window: int = 64, delta: float = 0.03, capacity: int = 65536,
                  check_every: int = 16, seed: int = 0, kind: str = "random", partition: str = "random",
-                 kmeans_iters: int = 10, C_init: int | None = None, split_factor: float = 0.0):
+                 kmeans_iters: int = 10, C_init: int | None = None, split_factor: float = 0.0,
+                 grow_cap: bool = False, reset_at: int = 0):
         if partition not in ("random", "kmeans"):
             raise ValueError(f"unknown partition {partition!r}")
         self.partition, self.kmeans_iters = partition, kmeans_iters
@@ -107,6 +113,9 @@ class SphereIndexGPU:
         if self.C_init > C or (self.split_factor > 0 and partition != "kmeans"):
             raise ValueError("C_init must be <= C, and splitting needs partition='kmeans'")
         self.splits = 0
+        self.capk = self.split_factor / self.C_init if grow_cap else 0.0   # cap per binned key, when it grows
+        self.reset_at = reset_at                # refit a head whose cluster count reaches this (0 = never)
+        self.resets = 0
         self._fresh_fit = False
         self.C, self.window, self.delta, self.capacity = C, window, delta, capacity
         self.check_every, self.seed, self.kind = check_every, seed, kind
@@ -217,6 +226,8 @@ class SphereIndexGPU:
             if self.split_factor > 0:                                      # only clusters that just received a key
                 got = torch.zeros(self.H_kv, self.C, dtype=torch.bool, device=self.device).scatter_(1, lab, True)
                 self._split_overflow(K, got)
+                if self.reset_at:
+                    self._reset_heads(K, (self.n_c >= self.reset_at).nonzero().squeeze(1))
         cnt = self.end - self.start
         self.head_steps += self.H_kv
         if cnt <= 0:
@@ -236,6 +247,26 @@ class SphereIndexGPU:
     def active_clusters(self) -> float:
         """Mean number of clusters in use per KV head (all ``C`` unless slots are spare)."""
         return float(self.n_c.float().mean()) if self.initialized else float(self.C)
+
+    def _cap_now(self) -> torch.Tensor:
+        """Each head's cap in keys: the one set at the fit, or ``split_factor ×`` the current mean
+        size of ``C_init`` clusters when the cap grows with the context."""
+        return torch.clamp(self.cap, min=self.capk * (self.end - self.start))
+
+    def _host_end(self) -> None:
+        """Bring ``self.end`` up to date before host-side work (kept on the GPU by subclasses)."""
+
+    def _reset_heads(self, K, heads: torch.Tensor) -> None:
+        """Fit ``heads`` again from all their binned keys, back to ``C_init`` clusters with a fresh
+        mean and cap, then divide any cluster over the cap as after the prompt fit."""
+        if heads.numel() == 0:
+            return
+        self._host_end()
+        self.fitted[heads] = False
+        self.n_c[heads] = self.C_init
+        self._build(K, heads, None)
+        self._split_after_fit(K)
+        self.resets += int(heads.numel())
 
     def _before_split(self, K) -> None:
         """Hook for subclasses that keep extra per-cluster sums: called before any split."""
@@ -258,7 +289,7 @@ class SphereIndexGPU:
         slots = torch.arange(self.C, device=self.device).unsqueeze(0)
         first = True
         while True:
-            over = (self.count > self.cap.unsqueeze(1)) & (slots < self.n_c.unsqueeze(1)) & (self.count >= 2)
+            over = (self.count > self._cap_now().unsqueeze(1)) & (slots < self.n_c.unsqueeze(1)) & (self.count >= 2)
             if cand is not None:
                 over &= cand
             hc = over.nonzero()                                               # host sync
@@ -294,7 +325,7 @@ class SphereIndexGPU:
         mag = Kr.norm(dim=-1)
         Kn = Kr / mag.clamp_min(1e-12).unsqueeze(-1)
         if nmeans:
-            k = torch.ceil(cnt * self.split_factor / self.cap[h]).long().clamp(min=2)
+            k = torch.ceil(cnt * self.split_factor / self._cap_now()[h]).long().clamp(min=2)
             part = _kmeans_padded(Kn, valid, k, self.kmeans_iters)
         else:
             part = _bisect_padded(Kn, valid)

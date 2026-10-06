@@ -156,7 +156,7 @@ def _split_cluster(k_ptr, s_kh, s_kn, cent_ptr, s_dh, nact_ptr, sumdir_ptr, mmax
 @triton.jit
 def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
                 rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, start, stop, nbinned,
-                delta, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
+                delta, capk, reset_at, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr):
     h = tl.program_id(0)
     offs_d = tl.arange(0, D)
     mu = tl.load(mu_ptr + h * D + offs_d)
@@ -189,7 +189,7 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_pt
         tl.store(cnt_ptr + row, cn)
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-        if (cn > cap) & (n_act < C) & (cn >= 2.0) & (cn <= MS):            # over its cap: split it now
+        if (cn > tl.maximum(cap, capk * p)) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # over its cap: split it now
             _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, mu,
                            lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi, n_act, p + 1,
                            C, D, MS, 1024, 64)
@@ -198,7 +198,8 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, s_dh, nact_ptr, sumdir_ptr, mmax_pt
     mu_t = ks / nbinned
     dist = tl.sqrt(tl.sum((mu_t - mu) * (mu_t - mu), axis=0))
     rb = tl.load(rbar_ptr + h)
-    tl.store(flag_ptr + h, tl.maximum(tl.load(flag_ptr + h), (dist > delta * rb).to(tl.int32)))
+    # bit 0: the mean has drifted; bit 1: the cluster count has reached the reset threshold
+    tl.store(flag_ptr + h, tl.load(flag_ptr + h) | (dist > delta * rb).to(tl.int32) | ((n_act >= reset_at).to(tl.int32) * 2))
 
 
 @triton.jit
@@ -353,7 +354,7 @@ class SphereIndexFused(SphereIndexGPU):
                 K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self.mmax, self.mmin, self.count,
                 self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
                 self.labels, self.labels.stride(0), self.end, new_end, float(new_end - 1), float(self.delta),
-                C=self.C, D=self.d, BC=self._bc(), MS=self.MS, num_warps=4)
+                float(self.capk), self.reset_at or 2 ** 30, C=self.C, D=self.d, BC=self._bc(), MS=self.MS, num_warps=4)
             self.end = new_end
         self.head_steps += self.H_kv
         if self.end - 1 <= 0:
@@ -363,12 +364,9 @@ class SphereIndexFused(SphereIndexGPU):
             return
         self._check_flags(K)
 
-    def _host_end(self) -> None:
-        """Bring ``self.end`` up to date before host-side work (kept on the GPU by subclasses)."""
-
     def _check_flags(self, K) -> None:
         if not self.async_check:
-            self._rebuild(K, self.flags.nonzero().squeeze(1))              # host sync
+            self._act_on(K, self.flags)                                    # host sync
             self.flags.zero_()
             return
         if self._pending is not None:
@@ -376,15 +374,20 @@ class SphereIndexFused(SphereIndexGPU):
             if self._waited > self.max_lag and not self._pending.query():  # the host has run far ahead of the GPU
                 self._pending.synchronize()
         if self._pending is not None and self._pending.query():            # earlier copy has landed
-            heads = self._flags_host.nonzero().squeeze(1)
             self._pending = None
-            self._rebuild(K, heads.to(self.device))
+            self._act_on(K, self._flags_host.to(self.device))
         if self._pending is None:
             self._flags_host.copy_(self.flags, non_blocking=True)
             self._pending = torch.cuda.Event()
             self._pending.record()
             self._waited = 0
             self.flags.zero_()
+
+    def _act_on(self, K, flags) -> None:
+        """Refit the heads whose cluster count reached the reset threshold; recenter the others that drifted."""
+        reset = (flags & 2) != 0
+        self._reset_heads(K, reset.nonzero().squeeze(1))
+        self._rebuild(K, (((flags & 1) != 0) & ~reset).nonzero().squeeze(1))
 
     def _rebuild(self, K, heads):
         if heads.numel():

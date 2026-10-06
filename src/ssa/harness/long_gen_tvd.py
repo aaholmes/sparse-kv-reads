@@ -10,6 +10,10 @@ distributions). Arms:
   refit   clusters fitted again on every key each ``--refit-every`` steps
   frozen512        as frozen with 512 clusters: more clusters, without tracking the new keys
   split_norecenter as split, never recentering (the mean stays the prompt's)
+  split_grow       as split, with a cap that grows with the context, which bounds the cluster count
+  split_reset      as split with 512 slots, refitting a head to 256 clusters when its count reaches 512
+
+``split`` and ``split_grow`` get ``--slots`` cluster slots (spare slots cost nothing).
 
 Collection writes, per chunk and arm, the mean TVD and the mean K+V read fraction (cluster summaries
 included) in blocks of 64 steps; ``summarize`` reads that file. Ratios are sums over chunks, with a
@@ -28,7 +32,12 @@ import torch
 
 BLOCK = 64
 ARMS = {"frozen": dict(C=256), "split": dict(C=512, C_init=256, split_factor=2.0), "refit": dict(C=256)}
-EXTRA_ARMS = {"frozen512": dict(C=512), "split_norecenter": dict(C=512, C_init=256, split_factor=2.0, delta=math.inf)}
+EXTRA_ARMS = {"frozen512": dict(C=512), "split_norecenter": dict(C=512, C_init=256, split_factor=2.0, delta=math.inf),
+              "split_grow": dict(C=512, C_init=256, split_factor=2.0, grow_cap=True),
+              "split_reset": dict(C=512, C_init=256, split_factor=2.0, reset_at=512)}
+PAIRS = [("split", "frozen"), ("refit", "frozen"), ("split", "refit"), ("split", "frozen512"),
+         ("split_norecenter", "split"), ("split_grow", "split"), ("split_reset", "split"), ("split_grow", "frozen"),
+         ("split_reset", "frozen"), ("split_reset", "split_grow")]
 
 
 def _interp_log(x0, y0, x1, y1, x):
@@ -38,9 +47,11 @@ def _interp_log(x0, y0, x1, y1, x):
 
 
 def summarize(payload: dict, *, nbins: int = 4, n_boot: int = 4000, seed: int = 0) -> list[dict]:
-    """Per budget and bin of generated tokens: each arm's TVD and read fraction, and the ratios
-    split ÷ frozen, refit ÷ frozen and split ÷ refit with bootstrap intervals over chunks. With two
-    budgets, also split ÷ frozen with split interpolated to frozen's read fraction."""
+    """Per budget and bin of generated tokens: each arm's TVD and read fraction, and the ratios in
+    ``PAIRS`` whose arms were run, with bootstrap intervals over chunks. With two budgets, each ratio
+    is also given with its first arm interpolated (log-log between the two budgets) to the second
+    arm's read fraction; pairs where that read fraction lies outside the first arm's two are listed
+    under ``extrapolated``."""
     tvd = {k: torch.tensor(v, dtype=torch.float64) for k, v in payload["tvd"].items()}        # [chunks, blocks]
     rd = {k: torch.tensor(v, dtype=torch.float64) for k, v in payload["reads"].items()}
     budgets = payload["budgets"]
@@ -54,30 +65,23 @@ def summarize(payload: dict, *, nbins: int = 4, n_boot: int = 4000, seed: int = 
 
     rows = []
     for b in budgets:
+        arms = [a for a in list(ARMS) + list(EXTRA_ARMS) if f"{a}_{b}" in tvd]
         for i in range(nbins):
             sl = slice(i * per, (i + 1) * per)
-            t = {a: tvd[f"{a}_{b}"][:, sl].mean(1) for a in ARMS}
-            r = {a: rd[f"{a}_{b}"][:, sl].mean(1) for a in ARMS}
+            t = {a: tvd[f"{a}_{b}"][:, sl].mean(1) for a in arms}
+            r = {a: rd[f"{a}_{b}"][:, sl].mean(1) for a in arms}
             row = {"budget": b, "generated": [i * per * BLOCK, (i + 1) * per * BLOCK],
-                   "tvd": {a: float(t[a].mean()) for a in ARMS}, "reads": {a: float(r[a].mean()) for a in ARMS},
-                   "split_over_frozen": ratio(t["split"], t["frozen"]),
-                   "refit_over_frozen": ratio(t["refit"], t["frozen"]),
-                   "split_over_refit": ratio(t["split"], t["refit"])}
-            for a in EXTRA_ARMS:
-                if f"{a}_{b}" in tvd:
-                    t[a], r[a] = tvd[f"{a}_{b}"][:, sl].mean(1), rd[f"{a}_{b}"][:, sl].mean(1)
-                    row["tvd"][a], row["reads"][a] = float(t[a].mean()), float(r[a].mean())
-            if "frozen512" in t:
-                row["split_over_frozen512"] = ratio(t["split"], t["frozen512"])
-            if "split_norecenter" in t:
-                row["split_norecenter_over_split"] = ratio(t["split_norecenter"], t["split"])
-            if len(budgets) == 2:
-                lo, hi = (f"split_{x}" for x in sorted(budgets))
-                for base in ("frozen", "frozen512"):                       # split interpolated to the other arm's reads
-                    if base in t:
-                        at = _interp_log(rd[lo][:, sl].mean(1), tvd[lo][:, sl].mean(1), rd[hi][:, sl].mean(1),
-                                         tvd[hi][:, sl].mean(1), r[base])
-                        row[f"split_over_{base}_matched_reads"] = ratio(at, t[base])
+                   "tvd": {a: float(t[a].mean()) for a in arms}, "reads": {a: float(r[a].mean()) for a in arms}}
+            two = sorted(budgets) if len(budgets) == 2 else None
+            for x, y in PAIRS:
+                if x in t and y in t:
+                    row[f"{x}_over_{y}"] = ratio(t[x], t[y])
+                    if two:                                                # x interpolated to y's reads
+                        r0, r1 = (rd[f"{x}_{v}"][:, sl].mean(1) for v in two)
+                        t0, t1 = (tvd[f"{x}_{v}"][:, sl].mean(1) for v in two)
+                        row[f"{x}_over_{y}_matched_reads"] = ratio(_interp_log(r0, t0, r1, t1, r[y]), t[y])
+                        if not float(r0.mean()) <= float(r[y].mean()) <= float(r1.mean()):
+                            row.setdefault("extrapolated", []).append(f"{x}_over_{y}")
             rows.append(row)
     return rows
 
@@ -91,7 +95,7 @@ def _decode(model, ids, cache, n, steps, mode, cfg, ref=None):
     dec.prepare(n)
     dec.capture()
     d = dec.d
-    out = [] if ref is None else None
+    out = torch.empty(steps, model.cfg.vocab_size, dtype=torch.float16) if ref is None else None   # host memory
     tvd = torch.zeros(steps, device="cuda", dtype=torch.float64)
     reads = torch.zeros(steps, device="cuda", dtype=torch.float64)
     torch.cuda.synchronize()
@@ -99,20 +103,21 @@ def _decode(model, ids, cache, n, steps, mode, cfg, ref=None):
     for j, t in enumerate(range(n, n + steps)):
         lg = dec.step(ids[:, t:t + 1], t)[0, -1]
         if ref is None:
-            out.append(lg.to(torch.float16).clone())
+            out[j] = lg.to(torch.float16)
         else:
-            tvd[j] = 0.5 * (lg.float().softmax(-1) - ref[j].float().softmax(-1)).abs().sum()
+            tvd[j] = 0.5 * (lg.float().softmax(-1) - ref[j].cuda().float().softmax(-1)).abs().sum()
             rows = torch.stack([i.cnt for i in dec.attn]).double().mean()
             ncl = torch.stack([i.n_c for i in dec.attn]).double().mean()
             reads[j] = (2 * rows + ncl * (1 + 2 / d)) / (2 * (t + 1))
         torch.cuda.synchronize()                                   # as a caller that reads each token would
     extra = {"clusters_end": float(torch.stack([i.n_c for i in dec.attn]).double().mean()),
              "splits": sum(i.splits for i in dec.attn), "recenterings": sum(i.rebuilds for i in dec.attn),
-             "refits": sum(i.refits for i in dec.attn),
+             "refits": sum(i.refits for i in dec.attn), "resets": sum(i.resets for i in dec.attn),
+             "clusters_max": int(max(int(i.n_c.max()) for i in dec.attn)),
              "ms_per_step": (time.perf_counter() - t_start) / steps * 1e3} if mode == "cluster" else {}
     del dec
     if ref is None:
-        return torch.stack(out)
+        return out
     return tvd.view(-1, BLOCK).mean(1).tolist(), reads.view(-1, BLOCK).mean(1).tolist(), extra
 
 
@@ -136,6 +141,8 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--tag", default="")
     p.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS) + list(EXTRA_ARMS))
+    p.add_argument("--slots", type=int, default=512, help="cluster slots for the split and split_grow arms")
+    p.add_argument("--nbins", type=int, default=4)
     p.add_argument("--merge", default=None, help="earlier result file (same chunks) whose other arms to include")
     args = p.parse_args()
     assert args.steps % BLOCK == 0
@@ -151,7 +158,8 @@ def main() -> None:
             ref = _decode(model, ids, cache, args.prompt, args.steps, "dense", {})
             for b in args.budgets:
                 for arm in args.arms:
-                    cfg = {**{**ARMS, **EXTRA_ARMS}[arm], "budget": b, "refit_every": args.refit_every if arm == "refit" else 0}
+                    cfg = {**{**ARMS, **EXTRA_ARMS}[arm], "budget": b,
+                           **({"C": args.slots} if arm in ("split", "split_grow") else {}), "refit_every": args.refit_every if arm == "refit" else 0}
                     tv, rd, ex = _decode(model, ids, cache, args.prompt, args.steps, "cluster", cfg, ref)
                     tvd.setdefault(f"{arm}_{b}", []).append(tv)
                     reads.setdefault(f"{arm}_{b}", []).append(rd)
@@ -160,6 +168,8 @@ def main() -> None:
                           f"{ex}  [{time.time() - t0:.0f}s]", flush=True)
         del ref, cache
         torch.cuda.empty_cache()
+        Path(f"src/ssa/results/long_gen_tvd_partial{args.tag}.json").write_text(      # survives a crash; gitignored name
+            json.dumps({"chunks_done": ci + 1, "args": vars(args), "tvd": tvd, "reads": reads, "extras": extras}))
     if args.merge:
         old = json.loads(Path(args.merge).read_text())
         assert all(old[k] == getattr(args, k) for k in ("prompt", "steps", "chunks", "budgets", "seed")) \
@@ -169,16 +179,17 @@ def main() -> None:
                 store.setdefault(k, v)
     payload = stamp({"kind": "long_gen_tvd", "merged_from": args.merge, "arms_run": args.arms, "model": args.model, "corpus": "wikitext_test", "prompt": args.prompt,
                      "steps": args.steps, "chunks": args.chunks, "budgets": args.budgets, "block": BLOCK,
-                     "refit_every": args.refit_every, "arms": {**ARMS, **{k: {a: str(b) for a, b in v.items()} for k, v in EXTRA_ARMS.items()}}, "seed": args.seed, "tvd": tvd, "reads": reads,
+                     "refit_every": args.refit_every, "slots": args.slots, "arms": {**ARMS, **{k: {a: str(b) for a, b in v.items()} for k, v in EXTRA_ARMS.items()}}, "seed": args.seed, "tvd": tvd, "reads": reads,
                      "extras": extras})
-    payload["summary"] = summarize(payload)
+    payload["summary"] = summarize(payload, nbins=args.nbins)
     out = Path("src/ssa/results") / f"long_gen_tvd_{payload['git_sha'][:8]}{args.tag}.json"
     out.write_text(json.dumps(payload, indent=1))
     f = lambda v: f"{v[0]:.2f} [{v[1]:.2f}, {v[2]:.2f}]"
     for r in payload["summary"]:
         print(f"budget {r['budget']} tokens {r['generated'][0]:>4}-{r['generated'][1]:<4} "
               + "  ".join(f"{a} {v:.4f}@{r['reads'][a]:.3f}" for a, v in r["tvd"].items()))
-        print("    " + "  ".join(f"{k} {f(v)}" for k, v in r.items() if "_over_" in k))
+        print("    " + "  ".join(f"{k} {f(v)}" for k, v in r.items() if "_over_" in k)
+              + (f"  extrapolated: {r['extrapolated']}" if "extrapolated" in r else ""))
     print(f"wrote {out}")
 
 
