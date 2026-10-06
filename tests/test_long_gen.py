@@ -27,3 +27,18 @@ def test_summary_bins_and_ratios():
     assert abs(last["split_over_refit"][0] - 2.0) < 1e-9 and abs(last["refit_over_frozen"][0] - 0.5 / 1.9286) < 0.01
     # split reads 0.21 at budget 0.2; at frozen's 0.20 it must do slightly worse than at 0.21
     assert last["split_over_frozen_matched_reads"][0] > last["split_over_frozen"][0]
+
+
+def test_summary_includes_extra_arms_when_present():
+    one = torch.full((5, 4), 0.04, dtype=torch.float64)
+    tvd, reads = {}, {}
+    for b in (0.1, 0.2):
+        for a, k, rd in (("frozen", 1.0, 0.0), ("split", 0.5, 0.01), ("refit", 0.6, 0.0), ("frozen512", 0.8, 0.02),
+                         ("split_norecenter", 0.55, 0.01)):
+            tvd[f"{a}_{b}"] = (one * k / (b * 10)).tolist()
+            reads[f"{a}_{b}"] = (torch.zeros(5, 4, dtype=torch.float64) + b + rd).tolist()
+    row = summarize({"tvd": tvd, "reads": reads, "budgets": [0.1, 0.2]}, nbins=2)[-1]
+    assert abs(row["split_over_frozen512"][0] - 0.5 / 0.8) < 1e-9
+    assert abs(row["split_norecenter_over_split"][0] - 1.1) < 1e-9
+    assert row["split_over_frozen512_matched_reads"][0] < row["split_over_frozen512"][0]    # split given 512's extra reads
+    assert set(row["tvd"]) == {"frozen", "split", "refit", "frozen512", "split_norecenter"}
