@@ -35,10 +35,20 @@ PROMPTS = {
         "etc.\n\nThe answer is: "),
 }
 MAX_NEW = {"hotpotqa": 32, "2wikimqa": 32, "musique": 32, "passage_retrieval_en": 32}
-CONDITIONS = [("exact", None, {})] + [
-    (f"cluster_{int(b * 100):02d}", "cluster_fused", {"budget": b, "C": 256, "window": 64, "delta": 0.03,
-                                                      "group": "sum_share", "check_every": 16, "partition": "kmeans"})
-    for b in (0.2, 0.1, 0.05)]
+BUDGETS = (0.2, 0.1, 0.05)
+
+
+def conditions(budgets=BUDGETS) -> list:
+    """Exact attention, then the cluster kernels at each budget. A budget of 1.0 reads every row
+    through the sparse path, which separates the effect of skipping rows from any numerical
+    difference between the two attention implementations."""
+    return [("exact", None, {})] + [
+        (f"cluster_{int(round(b * 100)):02d}", "cluster_fused",
+         {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share", "check_every": 16,
+          "partition": "kmeans"}) for b in budgets]
+
+
+CONDITIONS = conditions()
 
 
 def normalize_answer(s: str) -> str:
@@ -137,8 +147,10 @@ def main() -> None:
     p.add_argument("--n", type=int, default=100, help="examples per dataset (the first n)")
     p.add_argument("--max-length", type=int, default=31500, help="prompt tokens kept (middle truncated)")
     p.add_argument("--tail", type=int, default=64, help="final prompt tokens processed by the decode path")
+    p.add_argument("--budgets", type=float, nargs="+", default=list(BUDGETS))
     p.add_argument("--tag", default="")
     args = p.parse_args()
+    CONDITIONS = conditions(args.budgets)
 
     tok = AutoTokenizer.from_pretrained(args.model)
     model = _load_model(args.model, "cuda", torch.bfloat16)

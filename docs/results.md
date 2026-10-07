@@ -4,6 +4,86 @@ Supporting detail for the [README](../README.md). Unless stated otherwise, resul
 
 **Fixed directions and fitted clusters.** The method first grouped keys by the nearest of 256 fixed random directions (`partition="random"`; this file calls that version `cluster_skip`, and older result files call it `sphere_skip` or `voronoi_skip`); since October 2026 it groups them by centroids fitted with k-means at the end of the prompt (`partition="kmeans"`, the default). Every section below was measured with fixed directions unless it says otherwise. [Fitted clusters](#fitted-clusters) gives the results with the current method.
 
+## Current results (October 2026)
+
+This section holds the current measurements, with fitted clusters, 8-bit cluster vectors and every byte read counted. The sections after it are earlier measurements kept for their detail; where they give a different number for a setting covered here, this section is the current one.
+
+All results use bf16 on one consumer GPU, an RTX 5060 Ti with 16 GB of memory and 448 GB/s of bandwidth, decoding one sequence at a time unless stated. "Budget" is the fraction of keys the method reads. "Bytes read" is everything read per decode step as a fraction of the key and value (K+V) cache: the selected key and value rows, the cluster vectors, a label per cached token and a position per row read. Timings repeat closely: running a setting again in an independent run changes its median time by up to 2.5% for Qwen3-0.6B, whose 6–14 ms steps are sensitive to small delays on the CPU that launches them, and by under 0.1% for Qwen3-4B; speedups change by up to 0.03×.
+
+**What is current.** The fidelity, retrieval, task-accuracy and end-to-end speed results below were measured in October 2026 with the kernels as they are now. The per-layer attention timings and the long-generation runs predate the 8-bit cluster vectors (which a separate check found leave TVD unchanged) and have not been repeated.
+
+**Fidelity** (Qwen3-4B, 8,192-token context). Fidelity is the total variation distance (TVD) between the model's next-token distribution and the exact model's, on 8 WikiText-103 chunks with 95% bootstrap intervals over chunks, and the fraction of tokens where both pick the same top token ("top-1"). Systematic sampling, SANTA's best variant, reads every key and samples S value rows:
+
+| method | K+V bytes read | TVD from exact | top-1 |
+|---|---|---|---|
+| this method, 5% budget | 8.2% | 0.063 [0.054, 0.074] | 92.5% |
+| this method, 10% budget | 13.2% | 0.047 [0.040, 0.054] | 94.3% |
+| this method, 20% budget | 23.2% | 0.032 [0.027, 0.038] | 96.1% |
+| this method, 40% budget | 43.3% | 0.020 [0.017, 0.024] | 97.5% |
+| systematic sampling, 64 samples | 50.5% | 0.058 [0.049, 0.065] | 92.9% |
+| systematic sampling, 256 samples | 51.4% | 0.026 [0.023, 0.028] | 96.9% |
+
+![TVD from the exact model versus key and value rows read, for this method at budgets of 5–40% and systematic sampling with 64 and 256 samples](tvd_vs_reads_8192.png)
+
+**Attention only** (one layer, Qwen3-4B head layout, µs per decode step; ours includes choosing what to read). FlashInfer, the exact attention library used by serving engines such as SGLang, runs its single-sequence decode on a contiguous copy of the cache, its fastest case:
+
+| context | exact, FlashInfer | this method, 20% budget | this method, 5% budget |
+|---|---|---|---|
+| 8,192 | 92 | 55 (1.7× faster) | 45 (2.1×) |
+| 32,768 | 337 | 109 (3.1×) | 57 (5.9×) |
+| 65,536 | 660 | 182 (3.6×) | 80 (8.3×) |
+
+**End-to-end decoding** (whole model; B sequences of equal length decoded together; splitting on). Only the attention kernel differs between columns. The exact baseline is the faster of two exact kernels at each setting: the engine's own, and FlashInfer (see [How speed is measured](#how-speed-is-measured)):
+
+| model | batch × context | exact, tokens/s | 20% budget | 5% budget |
+|---|---|---|---|---|
+| Qwen3-0.6B | 1 × 32,768 | 71 | 1.75× faster | 2.15× |
+| Qwen3-0.6B | 2 × 32,768 | 86 | 2.14× | 2.92× |
+| Qwen3-0.6B | 4 × 16,384 | 171 | 2.05× | 2.78× |
+| Qwen3-0.6B | 8 × 8,192 | 342 | 1.89× | 2.47× |
+| Qwen3-4B | 1 × 32,768 | 29 | 1.28× | 1.37× |
+| Qwen3-4B | 2 × 16,384 | 58 | 1.24× | 1.33× |
+| Qwen3-4B | 4 × 8,192 | 115 | 1.21× | 1.30× |
+
+The speedup tracks the total number of tokens cached across the batch, relative to the size of the weights. With 16 GB, Qwen3-4B fits only ~32k cached tokens beside its 8 GB of weights, which caps its gain on this card.
+
+**Long-context retrieval** (needle-in-a-haystack tasks modelled on RULER, in my own implementation: a 7-digit number is hidden at a random depth in WikiText-103 text and the prompt asks for it; "multi-key" hides four numbers under different keys and asks for one). Qwen3-4B, 100 examples per cell. Exact attention and the 20% budget (21–22% of bytes read) are correct on every example at 16,384 and 32,768 tokens, except one multi-key example at 32,768 for the 20% budget. The 5% budget (6–7% of bytes) is correct on every example except in the multi-key task at 32,768 tokens, where it scores 0.96 (−0.04 [−0.08, −0.01] relative to exact).
+
+**Task accuracy** (LongBench question answering and retrieval, [arXiv:2308.14508](https://arxiv.org/abs/2308.14508), with the benchmark's prompts and scoring; Qwen3-4B, the first 100 examples of each set, prompts averaging 7–16 thousand tokens per set). Score, with the paired difference from exact and its 95% interval for all 400 examples:
+
+| set | exact | 20% budget | 10% budget | 5% budget |
+|---|---|---|---|---|
+| HotpotQA | 0.543 | 0.541 | 0.534 | 0.546 |
+| 2WikiMQA | 0.427 | 0.431 | 0.430 | 0.407 |
+| MuSiQue | 0.310 | 0.340 | 0.342 | 0.314 |
+| passage retrieval | 0.930 | 0.990 | 1.000 | 0.990 |
+| all | 0.552 | 0.575 (+0.023 [+0.005, +0.043]) | 0.576 (+0.024 [+0.001, +0.049]) | 0.564 (+0.012 [−0.012, +0.038]) |
+| K+V bytes read | 100% | 22.8% | 12.7% | 7.7% |
+
+No budget loses score beyond its interval. The gain on passage retrieval is real but narrow: on six examples the exact model gives a malformed answer (a bare number) that the sparse runs do not, and reading every row through the sparse kernels reproduces the exact score (0.94). I read this as no measurable loss, not as an improvement. In both tests the prompt is processed with exact attention, and its last 64 tokens and the answer use the sparse path.
+
+<a id="long-generations"></a>**Long generations.** Clusters fitted to the prompt go out of date as the model generates, a drift first described by DynaKV ([arXiv:2511.07427](https://arxiv.org/abs/2511.07427)), which splits clusters whose variance grows. Here a cluster is split when it exceeds a size cap. With an 8,192-token prompt followed by the document's own next tokens fed to the model, at a 20% budget (TVD in the last sixth of the run; ratio at matched bytes read, 95% interval over chunks):
+
+| model, final context | clusters fixed at the prompt | with splitting | ratio |
+|---|---|---|---|
+| Qwen3-4B, 32,768 (4 chunks) | 0.060 | 0.032 | 0.54 [0.51, 0.58] |
+| Qwen3-0.6B, 40,896 (6 chunks) | 0.073 | 0.043 | 0.60 [0.57, 0.62] |
+
+Doubling the number of clusters fitted at the prompt does not prevent the drift, and limiting how many clusters splitting may create gives up much of the gain: the number of clusters has to grow with the context (to about 900–1,100 per KV head here). Splitting itself adds 1–3% to decode time; the extra clusters add 5% (Qwen3-4B) to 17% (Qwen3-0.6B) over these runs, because scoring and selection grow with the cluster count. Not yet tested: text the model generates itself (one attempt, sampling at temperature 1, produced degenerate text and showed nothing), and DynaKV's variance rule run alongside the size cap.
+
+- **Attention gets much faster, and more so at longer context.** FlashInfer already reads the cache at 81–91% of the card's bandwidth, so the gain comes from reading less, not from a faster kernel.
+- **End to end, the weights limit the gain at batch 1.** Reading Qwen3-4B's 8 GB of weights takes ~22 ms of each token's 34.8 ms, so even free attention could not exceed about 1.6×. Batching helps, because the weights are read once per batch while each sequence's cache is read separately.
+- **Fidelity costs something, less than sampling does.** Reading 8% of the cache is about as close to the exact model as 64-sample sampling, which reads 51%; reading 43% is closer than 256-sample sampling. On four LongBench sets the difference from exact attention is not measurable. For scale, 8-bit and naive 4-bit weight quantization of Qwen3-4B give TVD 0.018 and 0.144.
+- **Not yet done:** free-running generation; a comparison with other methods' update rules during generation, and with their much smaller read budgets (1–6% of the cache); other model families; sequences of different lengths in one batch; RULER's harder tasks; datacenter GPUs; integration into a serving engine such as SGLang.
+
+<a id="how-speed-is-measured"></a>*How speed is measured.* The model runs in my own Qwen3 inference engine. `GraphDecoder` (`src/ssa/models/graph_decode.py`) reruns the engine's per-token forward pass, with the engine's own layers, weights and cache, as one CUDA graph (a recorded sequence of GPU operations replayed with one launch), so only the attention kernel differs between conditions. Two exact kernels are timed: the engine's own Triton kernel, which splits each sequence across thread blocks and merges the parts (flash-decoding), and FlashInfer's paged decode, which reads the engine's contiguous cache in place as 16-token pages and is told the new length by the CPU before each token. Per layer FlashInfer is as fast as its single-sequence decode, but end to end it is 0.2–0.6 ms per token slower, most likely because of that per-token step, so speedups are reported relative to the faster of the two. Per-layer timings flush the L2 cache before each call and take the median of 100 calls; end-to-end timings take the median of 3 repeats of 64 steps. Full tables, with every context length and both exact kernels, are in the sections below.
+
+*What matters in the design.* An ablation on captured keys (8 WikiText contexts at 8,192 tokens, single-layer attention error at matched reads) varied three choices with everything else fixed. How keys are grouped is the one that matters: clusters fitted by k-means have 0.28–0.66× the error of clusters from fixed random directions at layers 12–35. The scoring rule changes the error by under 10% with fixed directions, and subtracting the mean key matters only with fixed directions.
+
+*Other settings.* At 32,768 tokens a 20% budget (21% of bytes read) gives TVD 0.058 [0.043, 0.072] on Qwen3-4B and 0.042 [0.032, 0.055] on Qwen3-0.6B, and a 5% budget (6% of bytes) 0.090 and 0.095. Smaller clusters do better at matched bytes: with splitting, a cap of 32 keys per cluster has 0.91× the TVD of a cap of 64, and a cap of 128 has 1.04× (Qwen3-4B, 12k context).
+
+*Sampling the skipped clusters does not help.* Reading the top clusters exactly and sampling some of the rest, weighted by inverse inclusion probability, removes the bias. At equal bytes read its TVD is 5–15% higher than reading more top clusters on Qwen3-4B, and within about 10% either way on Qwen3-0.6B, at 8,192 and 32,768 tokens: what the bias costs, the added variance costs back.
+
 ## Fidelity compared with systematic sampling
 
 | context | method | K+V rows read | TVD from exact |
