@@ -1,6 +1,8 @@
 # Efficient inference by reducing KV cache reads
 
-When a large language model generates text at long context, its speed is limited by memory traffic: every new token re-reads the cached key and value vectors of every earlier token (the KV cache). I developed a training-free method that reads only the part of the cache each token needs, wrote GPU kernels for it in Triton, and ran it inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)).
+When a large language model generates text at long context, its speed is limited by memory traffic: every new token re-reads the cached key and value vectors of every earlier token (the KV cache). After reproducing SANTA ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), which samples which cached values to read but still reads part of every key, I asked whether most keys could be skipped too. My idea was to group the keys by direction, choose which groups to read from small summaries of them, and split groups as generation adds to them. I built it as Triton GPU kernels inside a Qwen3 inference engine I wrote separately ([github.com/aaholmes/llms](https://github.com/aaholmes/llms)), and it worked.
+
+I then found that the main ideas had already been published: clustering keys and reading the best clusters by ClusterKV ([arXiv:2412.03213](https://arxiv.org/abs/2412.03213)), and splitting clusters during generation by DynaKV ([arXiv:2511.07427](https://arxiv.org/abs/2511.07427)). So this repository is an independent implementation of that approach, with measurements of how it behaves on a GPU.
 
 On one consumer GPU (RTX 5060 Ti, 16 GB):
 
@@ -47,9 +49,9 @@ The small gains come mostly from six examples in one set, and I read the result 
 
 ## Relation to other work
 
-Reading the cache selectively by clustering keys is an active area. This method is closest to ClusterKV ([arXiv:2412.03213](https://arxiv.org/abs/2412.03213)), which also clusters keys with k-means and reads the top clusters, and to DynaKV ([arXiv:2511.07427](https://arxiv.org/abs/2511.07427)), which first described clusters drifting out of date during generation and splits them. Most other methods handle generated tokens by clustering them separately or leaving the clusters fixed. What I have not found elsewhere is the split done on the GPU inside the insertion kernel, and error measured as a function of generated tokens over tens of thousands of tokens. [docs/related_work.md](docs/related_work.md) describes nine related methods and what is shared with each.
+Reading the cache selectively by clustering keys is an active area; [docs/related_work.md](docs/related_work.md) describes nine methods and what this one shares with each. Two points of contact are direct. My first version grouped keys by fixed random directions; after finding ClusterKV I compared the two and adopted its k-means clustering, which was clearly better. And I compared my rule for splitting a cluster (its size) with DynaKV's (its variance) and found no difference between them.
 
-The project began as a reproduction of SANTA ([arXiv:2605.01910](https://arxiv.org/abs/2605.01910)), which samples which cached values to read; that work is in [docs/sampling.md](docs/sampling.md).
+What this repository adds is measurement: speed relative to FlashInfer, alone and batched; task accuracy; error tracked over tens of thousands of generated tokens; and the finding that the number of clusters has to grow with the context. The earlier sampling work is in [docs/sampling.md](docs/sampling.md).
 
 ## Limits
 

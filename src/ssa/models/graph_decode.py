@@ -29,7 +29,8 @@ from ..kernels.graph_kernels import DenseAttentionGraph, SphereIndexGraph
 class GraphDecoder:
     def __init__(self, model, cache, *, mode: str = "dense", budget: float = 0.2, C: int = 256,
                  window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", C_init: int | None = None, split_factor: float = 0.0, refit_every: int = 0, grow_cap: bool = False, reset_at: int = 0,
-                 summary_bits: int = 8, cap_keys: float = 0.0, **_):
+                 summary_bits: int = 8, cap_keys: float = 0.0, fused_insert: bool = False,
+                 var_factor: float = 0.0, var_min: int = 8, **_):
         cfg = model.cfg
         self.model, self.cache, self.mode = model, cache, mode
         self.H, self.H_kv, self.d = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
@@ -55,17 +56,23 @@ class GraphDecoder:
                                           check_every=check_every, partition=partition, C_init=C_init,
                                           split_factor=split_factor, refit_every=refit_every, grow_cap=grow_cap,
                                           reset_at=reset_at, summary_bits=summary_bits,
-                                          cap_keys=cap_keys) for _ in model.layers]
+                                          cap_keys=cap_keys, var_factor=var_factor, var_min=var_min)
+                         for _ in model.layers]
         else:
             raise ValueError(f"unknown mode {mode!r}")
         self.graph = None
         self.logits = None
+        self.fused_insert = fused_insert and mode == "cluster"
+        self.insert_all = None
 
     def prepare(self, n: int) -> None:
         """Build attention state from the first ``n`` cached positions (after prefill)."""
         if self.mode == "cluster":
             for i, idx in enumerate(self.attn):
                 idx.prepare(self._heads(self.cache.k[i]), n, self.B * self.H)
+            if self.fused_insert:                                      # one insertion launch for all layers
+                from ..kernels.graph_kernels import AllLayerInsert
+                self.insert_all = AllLayerInsert(self.attn, [self._heads(k) for k in self.cache.k[:len(self.attn)]])
 
     def _heads(self, c: torch.Tensor) -> torch.Tensor:
         """Cache ``[B, H_kv, L, d]`` -> ``[B·H_kv, L, d]`` (a view)."""
@@ -74,6 +81,8 @@ class GraphDecoder:
     def _body(self) -> torch.Tensor:
         m, H, H_kv, d, B = self.model, self.H, self.H_kv, self.d, self.B
         self.n_dev.copy_(self.pos + 1)
+        if self.insert_all is not None:
+            self.insert_all(self.n_dev)
         h = m.embed(self.tok)                                              # [B, 1, hidden]
         cos = m.rope_cos.index_select(0, self.pos)
         sin = m.rope_sin.index_select(0, self.pos)
@@ -93,7 +102,8 @@ class GraphDecoder:
             elif self.mode == "flashinfer":
                 out = self.fi(qh, kc, vc)
             else:
-                out = self.attn[i].step(qh.view(B * H, d), self._heads(kc), self._heads(vc), self.n_dev)
+                out = self.attn[i].step(qh.view(B * H, d), self._heads(kc), self._heads(vc), self.n_dev,
+                                        insert=self.insert_all is None)
             h = h + a.o(out.reshape(B, 1, H * d))
             h = h + layer.ffn(layer.norm2(h))
         h = m.final_norm(h)

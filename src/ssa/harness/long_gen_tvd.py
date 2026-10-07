@@ -15,7 +15,9 @@ distributions). Arms:
 
   split_f32        as split, with scoring and insertion reading float32 cluster vectors (not 8-bit copies)
 
-  split_cap32, split_cap64, split_cap128   split with an absolute cap of that many keys per cluster
+  split_cap16 ... split_cap128   split with an absolute cap of that many keys per cluster
+  split_var105 ... split_var150  the trigger DynaKV describes: split a cluster when the variance of its
+                   keys' directions exceeds 1.05–1.5 × the mean variance of its head's clusters at the fit
 
 ``split``, ``split_grow`` and the ``split_cap`` arms get ``--slots`` cluster slots (spare slots cost nothing).
 
@@ -47,13 +49,15 @@ EXTRA_ARMS = {"frozen512": dict(C=512), "split_norecenter": dict(C=512, C_init=2
               "split_grow": dict(C=512, C_init=256, split_factor=2.0, grow_cap=True),
               "split_reset": dict(C=512, C_init=256, split_factor=2.0, reset_at=512),
               "split_f32": dict(C=512, C_init=256, split_factor=2.0, summary_bits=32),
-              **{f"split_cap{c}": dict(C=512, C_init=256, cap_keys=float(c)) for c in (32, 64, 128)}}
-SLOTTED = ("split", "split_grow", "split_cap32", "split_cap64", "split_cap128")
+              **{f"split_cap{c}": dict(C=512, C_init=256, cap_keys=float(c)) for c in (16, 32, 64, 128)},
+              **{f"split_var{round(f * 100)}": dict(C=512, C_init=256, var_factor=f) for f in (1.05, 1.15, 1.3, 1.5)}}
+SLOTTED = ("split", "split_grow") + tuple(a for a in EXTRA_ARMS if a.startswith(("split_cap", "split_var")))
 PAIRS = [("split", "frozen"), ("refit", "frozen"), ("split", "refit"), ("split", "frozen512"),
          ("split_norecenter", "split"), ("split_grow", "split"), ("split_reset", "split"), ("split_grow", "frozen"),
          ("split_reset", "frozen"), ("split_reset", "split_grow"), ("split", "split_f32"),
          ("split_cap64", "frozen"), ("split_cap32", "split_cap64"), ("split_cap128", "split_cap64"),
-         ("split_cap64", "split")]
+         ("split_cap64", "split"), ("split_cap16", "split_cap64"),
+         *[(f"split_var{v}", b) for v in (105, 115, 130, 150) for b in ("split", "frozen")]]
 
 
 def _interp_log(x0, y0, x1, y1, x):

@@ -29,6 +29,12 @@ slots, and splitting stops when none are left. Clusters are never merged (a v2 q
 with it the cluster count at a given context length, does not depend on how long the prompt was
 (``split_factor``, 2 by default then, remains the ratio of the cap to the size the fit aims for).
 
+``var_factor`` gives the trigger DynaKV (arXiv:2511.07427) describes, in place of or alongside the
+size cap: a cluster that has just received a key is split once if the variance of its keys'
+directions exceeds ``var_factor ×`` the mean variance of its head's clusters at the fit (and it
+holds at least ``var_min`` keys). Nothing is split at the fit under this rule. The threshold's
+definition and ``var_min`` are my choices; the paper says only that the threshold is set per head.
+
 Two ways to bound the cluster count, which otherwise grows in proportion to the context:
 ``grow_cap`` makes the cap ``split_factor ×`` the current mean size of ``C_init`` clusters, so a
 cluster splits only when it holds more than that multiple of its share of the keys; ``reset_at``
@@ -108,14 +114,17 @@ class SphereIndexGPU:
     def __init__(self, *, C: int = 256, window: int = 64, delta: float = 0.03, capacity: int = 65536,
                  check_every: int = 16, seed: int = 0, kind: str = "random", partition: str = "random",
                  kmeans_iters: int = 10, C_init: int | None = None, split_factor: float = 0.0,
-                 grow_cap: bool = False, reset_at: int = 0, cap_keys: float = 0.0):
+                 grow_cap: bool = False, reset_at: int = 0, cap_keys: float = 0.0, var_factor: float = 0.0,
+                 var_min: int = 8):
         if partition not in ("random", "kmeans"):
             raise ValueError(f"unknown partition {partition!r}")
         self.partition, self.kmeans_iters = partition, kmeans_iters
         self.C_init = C if C_init is None else C_init
         self.cap_keys = float(cap_keys)         # absolute cap in keys (0: split_factor × mean size at the fit)
         self.split_factor = float(split_factor) if split_factor or not cap_keys else 2.0
-        if self.C_init > C or (self.split_factor > 0 and partition != "kmeans"):
+        self.var_factor, self.var_min = float(var_factor), int(var_min)
+        self.splitting = self.split_factor > 0 or self.var_factor > 0
+        if self.C_init > C or (self.splitting and partition != "kmeans"):
             raise ValueError("C_init must be <= C, and splitting needs partition='kmeans'")
         self.splits = 0
         self.capk = self.split_factor / self.C_init if grow_cap else 0.0   # cap per binned key, when it grows
@@ -142,6 +151,7 @@ class SphereIndexGPU:
         self.n_c = torch.full((H_kv,), self.C_init if self.partition == "kmeans" else C, dtype=torch.long,
                               device=device)                          # active clusters per head
         self.cap = torch.full((H_kv,), math.inf, **kw)                 # split a cluster above this many keys
+        self.vthr = torch.full((H_kv,), math.inf, **kw)                # or above this spread of its directions
         self.sum_dir = torch.zeros(H_kv, C, d, **kw)
         self.mmax = torch.zeros(H_kv, C, **kw)
         self.mmin = torch.full((H_kv, C), math.inf, **kw)
@@ -201,6 +211,10 @@ class SphereIndexGPU:
                         self._fresh_fit = True
             self.rbar[heads] = Kr.pow(2).sum(-1).mean(1).sqrt()
             self.labels[heads, self.start:self.end] = self._bin(Kr, heads).to(torch.int16)
+            if self.var_factor > 0 and self.partition == "kmeans" and bool(todo.any()):
+                fit = heads[todo]                                          # threshold from the fit's own clusters
+                used = (self.count[fit] > 0).to(self.dtype)
+                self.vthr[fit] = self.var_factor * (self._spread()[fit] * used).sum(1) / used.sum(1).clamp_min(1)
         else:
             self.rbar[heads] = 0
 
@@ -228,7 +242,7 @@ class SphereIndexGPU:
             lab = self._bin(Kn - self.mu_ref.unsqueeze(1), heads)
             self.labels[:, self.end:new_end] = lab.to(torch.int16)
             self.end = new_end
-            if self.split_factor > 0:                                      # only clusters that just received a key
+            if self.splitting:                                             # only clusters that just received a key
                 got = torch.zeros(self.H_kv, self.C, dtype=torch.bool, device=self.device).scatter_(1, lab, True)
                 self._split_overflow(K, got)
                 if self.reset_at:
@@ -257,6 +271,11 @@ class SphereIndexGPU:
         """Each head's cap in keys: the one set at the fit, or ``split_factor ×`` the current mean
         size of ``C_init`` clusters when the cap grows with the context."""
         return torch.clamp(self.cap, min=self.capk * (self.end - self.start))
+
+    def _spread(self) -> torch.Tensor:
+        """Per cluster, the variance of its keys' unit directions about their mean:
+        ``1 − ‖Σ directions‖² / count²`` (0 for an empty or single-key cluster)."""
+        return (1 - self.sum_dir.pow(2).sum(-1) / self.count.clamp_min(1).pow(2)).clamp_min(0) * (self.count > 0)
 
     def _host_end(self) -> None:
         """Bring ``self.end`` up to date before host-side work (kept on the GPU by subclasses)."""
@@ -289,12 +308,17 @@ class SphereIndexGPU:
         """Split clusters over their head's cap until none is, or no spare slot is left. ``cand
         [H_kv, C]`` restricts the test to those clusters (and the pieces they are split into).
         ``nmeans`` divides each cluster in one step into about size ÷ mean size parts first."""
-        if self.split_factor <= 0:
+        if not self.splitting:
             return
         slots = torch.arange(self.C, device=self.device).unsqueeze(0)
         first = True
+        by_spread = cand is not None                  # a spread over the threshold splits once, on receiving a key
         while True:
-            over = (self.count > self._cap_now().unsqueeze(1)) & (slots < self.n_c.unsqueeze(1)) & (self.count >= 2)
+            over = self.count > self._cap_now().unsqueeze(1)
+            if by_spread:
+                over |= (self._spread() > self.vthr.unsqueeze(1)) & (self.count >= self.var_min)
+                by_spread = False
+            over &= (slots < self.n_c.unsqueeze(1)) & (self.count >= 2)
             if cand is not None:
                 over &= cand
             hc = over.nonzero()                                               # host sync

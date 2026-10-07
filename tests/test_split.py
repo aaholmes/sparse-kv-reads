@@ -207,3 +207,44 @@ def test_an_absolute_cap_does_not_depend_on_the_prompt_length():
     assert (short.n_c.float().mean() / long.n_c.float().mean() - 1).abs() < 0.35   # similar counts at equal context
     cnt, sd, mx, mn = _recount(short, K)
     torch.testing.assert_close(short.count, cnt)
+
+
+def _spread(idx):
+    """1 − ‖mean unit direction‖² per cluster, recomputed from the stored sums."""
+    return 1 - (idx.sum_dir ** 2).sum(-1) / idx.count.clamp_min(1) ** 2
+
+
+def test_variance_triggered_split_as_in_dynakv():
+    q, K, V = _qkv(n=1500, seed=9)
+    kw = {**KW, "C": 256, "capacity": 1600, "split_factor": 0.0, "var_factor": 1.0, "var_min": 6}
+    idx = SphereIndexGPU(**kw)
+    idx.observe(K, 600)
+    assert idx.splits == 0 and torch.all(idx.n_c == 16)                    # nothing is split at the prompt fit
+    v0 = _spread(idx)[:, :16]
+    torch.testing.assert_close(idx.vthr, 1.0 * v0.mean(1))                 # threshold: a multiple of the head's mean spread
+    assert torch.all(torch.isinf(idx.cap))                                  # no size cap
+    seen = 0
+    for n in range(601, 1500):
+        nc0, cnt0 = idx.n_c.clone(), idx.count.clone()
+        got = idx.labels[:, n - W - 1].long() if n - W - 1 >= idx.end else None
+        idx.observe(K, n)
+        for h in (idx.n_c > nc0).nonzero().flatten().tolist():
+            assert int(idx.n_c[h]) == int(nc0[h]) + 1                      # one split per inserted key
+            seen += 1
+    assert seen == idx.splits > 0
+    cnt, sd, mx, mn = _recount(idx, K)
+    torch.testing.assert_close(idx.count, cnt)
+    torch.testing.assert_close(idx.sum_dir, sd, rtol=1e-9, atol=1e-9)
+    live = idx.count >= 2
+    assert _spread(idx)[live].mean() < v0.mean()                            # clusters end tighter than at the fit
+
+
+def test_spread_is_the_variance_of_the_unit_directions():
+    q, K, V = _qkv(n=700, seed=10)
+    idx = SphereIndexGPU(**{**KW, "split_factor": 0.0})
+    idx.observe(K, 700)
+    h, c = 1, int(idx.count[1].argmax())
+    pos = (idx.labels[h, 1:idx.end] == c).nonzero().flatten() + 1
+    u = torch.nn.functional.normalize(K[h, pos] - idx.mu_ref[h], dim=-1)
+    direct = ((u - u.mean(0)) ** 2).sum(-1).mean()
+    torch.testing.assert_close(idx._spread()[h, c], direct)

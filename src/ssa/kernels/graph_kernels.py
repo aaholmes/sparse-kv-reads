@@ -60,12 +60,17 @@ def _dense_dev_kernel(q_ptr, k_ptr, v_ptr, n_ptr, m_out, l_out, a_out, num_split
 
 
 @triton.jit
-def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                    rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta, capk, reset_at,
-                    C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr, Q8: tl.constexpr):
+def _bin_dev_kernel(k_ptr, koff_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
+                    rbar_ptr, flag_ptr, cap_ptr, vthr_ptr, vmin, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, end_ptr, need_ptr, n_ptr, window, budget, delta, capk, reset_at,
+                    C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr, Q8: tl.constexpr,
+                    HPL: tl.constexpr):
     """Bin the keys that left the recent window since the last call; update this head's
     binned count, budget in keys and drift flag. All lengths read from GPU memory."""
     h = tl.program_id(0)
+    # One program per KV head. A launch may cover several layers (``HPL`` heads each): every state
+    # array is then stacked over layers and indexed by ``h``, while each layer's keys sit in a
+    # cache tensor of their own, ``koff[layer]`` elements away from the first layer's.
+    k_ptr = k_ptr + tl.load(koff_ptr + h // HPL) - (h - h % HPL) * s_kh
     offs_d = tl.arange(0, D)
     n = tl.load(n_ptr)
     old_end = tl.load(end_ptr + h)
@@ -74,6 +79,7 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdi
     ks = tl.load(ksum_ptr + h * D + offs_d)
     n_act = tl.load(nact_ptr + h).to(tl.int32)             # clusters in use; later slots are spare
     cap = tl.load(cap_ptr + h)
+    vthr = tl.load(vthr_ptr + h)
     for p in range(old_end, new_end):
         k = tl.load(k_ptr + h * s_kh + p * s_kn + offs_d).to(tl.float32)
         ks += k
@@ -108,7 +114,8 @@ def _bin_dev_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdi
         tl.store(cnt_ptr + row, cn)
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-        if (cn > tl.maximum(cap, capk * p)) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # over its cap: split it now
+        wide = (1.0 - tl.sum(sd * sd, axis=0) / (cn * cn) > vthr) & (cn >= vmin)       # spread over the threshold
+        if ((cn > tl.maximum(cap, capk * p)) | wide) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # split it now
             _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr,
                            mmin_ptr, cnt_ptr, mu, lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi,
                            n_act, p + 1, C, D, MS, 1024, 64, Q8)
@@ -189,6 +196,7 @@ class SphereIndexGraph(SphereIndexFused):
         super().__init__(**kw)
         self.refit_every = refit_every          # refit the clusters to every binned key this often (0 = never)
         self.refits = 0
+        self._koff0 = None
         self.budget = budget
         self.block_n = block_n
         self.compact_block = compact_block
@@ -209,17 +217,14 @@ class SphereIndexGraph(SphereIndexFused):
         self.cnt = torch.zeros(H_kv, dtype=torch.int32, device=dev)
         self.buf = _SplitBuffers(H_kv, G, d, max(1, triton.cdiv(4 * _sm_count(dev), H_kv)), K.dtype, dev)
 
-    def step(self, q, K, V, n_dev):
-        """One decode step; ``K, V [H_kv, capacity, d]`` with position ``n-1`` already written."""
+    def step(self, q, K, V, n_dev, insert: bool = True):
+        """One decode step; ``K, V [H_kv, capacity, d]`` with position ``n-1`` already written.
+        ``insert=False`` when the keys leaving the window were already inserted for every layer
+        by one launch (``AllLayerInsert``)."""
         H_kv, C, d = self.H_kv, self.C, self.d
         bc = self._bc()
-        _bin_dev_kernel[(H_kv,)](
-            K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self._qdir(), self.mmax, self.mmin,
-            self.count,
-            self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
-            self.labels, self.labels.stride(0), self.end_dev, self.need_dev, n_dev, self.window, float(self.budget),
-            float(self.delta), float(self.capk), self.reset_at or 2 ** 30, C=C, D=d, BC=bc, MS=self.MS,
-            Q8=self.dir8 is not None, num_warps=4)
+        if insert:
+            self._insert(K, n_dev)
         grid = (H_kv, C // bc)
         _score_kernel[grid](q, q.stride(0), self._qdir(), self.mmax, self.mmin, self.count, self.n_c, self.scratch,
                             G=self.G, G_PAD=self.G_PAD, C=C, D=d, BC=bc, num_warps=4)
@@ -237,6 +242,17 @@ class SphereIndexGraph(SphereIndexFused):
             b.a.stride(1), b.a.stride(2), G=self.G, G_PAD=self.G_PAD, D=d, BLOCK_N=self.block_n,
             PER_HEAD=False, num_stages=3, num_warps=4)
         return _merge_into(b)
+
+    def _insert(self, K, n_dev) -> None:
+        if self._koff0 is None:
+            self._koff0 = torch.zeros(1, dtype=torch.int64, device=self.device)
+        _bin_dev_kernel[(self.H_kv,)](
+            K, self._koff0, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self._qdir(),
+            self.mmax, self.mmin, self.count, self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self.vthr,
+            float(self.var_min), self._mem,
+            self._proj, self._side, self.nsplit, self.labels, self.labels.stride(0), self.end_dev, self.need_dev,
+            n_dev, self.window, float(self.budget), float(self.delta), float(self.capk), self.reset_at or 2 ** 30,
+            C=self.C, D=self.d, BC=self._bc(), MS=self.MS, Q8=self.dir8 is not None, HPL=self.H_kv, num_warps=4)
 
     def _host_end(self) -> None:
         self.end = int(self.end_dev[0])                                          # host sync, only when a flag was set
@@ -261,3 +277,48 @@ class SphereIndexGraph(SphereIndexFused):
         self.flags.zero_()
         self._pending = None
         self.refits += 1
+
+
+STACKED = ("n_c", "sum_dir", "dir8", "cent", "cent8", "mmax", "mmin", "count", "ksum", "mu_ref", "rbar", "flags", "cap",
+           "vthr", "_mem", "_proj", "_side", "nsplit", "labels", "end_dev", "need_dev")
+
+
+class AllLayerInsert:
+    """One insertion launch for every layer. The key that leaves the recent window at a step was
+    written ``window`` steps earlier at every layer, so all layers' insertions (and the splits they
+    trigger) can run together before the first layer, one program per (layer, KV head), instead of
+    one launch per layer.
+
+    Built after every layer's index is prepared: the per-head state of all layers is moved into
+    arrays stacked over layers, and each layer's index is pointed at its slice, so the per-layer
+    kernels and the host-side maintenance work on the same memory as before."""
+
+    def __init__(self, layers: list, caches: list):
+        first = layers[0]
+        assert first.window >= 1, "with no recent window the key to insert is not yet written at later layers"
+        assert all(i.H_kv == first.H_kv and i.end == first.end for i in layers)
+        self.layers, self.L = layers, len(layers)
+        self.big = {}
+        for name in STACKED:
+            if getattr(first, name, None) is None:
+                continue
+            self.big[name] = torch.stack([getattr(i, name) for i in layers])          # [L, H_kv, ...]
+            for l, i in enumerate(layers):
+                setattr(i, name, self.big[name][l])
+        k0 = caches[0]
+        size = k0.element_size()
+        off = [k.data_ptr() - k0.data_ptr() for k in caches]
+        assert all(o % size == 0 for o in off) and all(k.stride() == k0.stride() for k in caches)
+        self.koff = torch.tensor([o // size for o in off], dtype=torch.int64, device=first.device)
+        self.k0 = k0
+
+    def __call__(self, n_dev) -> None:
+        f, b = self.layers[0], self.big
+        dirs = (b["cent8"] if "cent8" in b else b["cent"], b["cent"], f.C * f.d) if f.partition == "kmeans" \
+            else (f.dirs, f.dirs, 0)
+        _bin_dev_kernel[(self.L * f.H_kv,)](
+            self.k0, self.koff, self.k0.stride(0), self.k0.stride(1), *dirs, b["n_c"], b["sum_dir"],
+            b.get("dir8", b["sum_dir"]), b["mmax"], b["mmin"], b["count"], b["ksum"], b["mu_ref"], b["rbar"], b["flags"],
+            b["cap"], b["vthr"], float(f.var_min), b["_mem"], b["_proj"], b["_side"], b["nsplit"], b["labels"], f.labels.stride(0), b["end_dev"],
+            b["need_dev"], n_dev, f.window, float(f.budget), float(f.delta), float(f.capk), f.reset_at or 2 ** 30,
+            C=f.C, D=f.d, BC=f._bc(), MS=f.MS, Q8="dir8" in b, HPL=f.H_kv, num_warps=4)

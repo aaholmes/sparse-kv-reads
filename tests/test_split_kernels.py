@@ -239,3 +239,91 @@ def test_graph_decoder_with_reset_is_exact_at_full_budget():
                    delta=float("inf"), check_every=4)
     torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
     assert all(int(i.n_c.max()) < 48 for i in dec.attn)
+
+
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("cfg", [dict(C=64, C_init=16, split_factor=2.0), dict(C=32), dict(C=32, partition="random"),
+                                 dict(C=64, C_init=16, split_factor=2.0, summary_bits=32)])
+def test_one_insertion_launch_for_all_layers_gives_identical_decoding(capture, cfg):
+    from ssa.models.graph_decode import GraphDecoder
+    mc = TinyCfg(head_dim=16, max_position_embeddings=1024, num_attention_heads=4, num_key_value_heads=2)
+    P, T, B = 200, 300, 2
+    model = tiny_model(mc, seed=7).to("cuda").eval()
+    ids = torch.randint(0, mc.vocab_size, (B, P + T + 1), device="cuda", generator=torch.Generator(device="cuda").manual_seed(7))
+
+    def run(**kw):
+        cache = model.alloc_cache(-(-(P + T + 2) // 16) * 16, max_batch=B)
+        out = []
+        with torch.inference_mode():
+            model(ids[:, :P], cache, start_pos=0)
+            dec = GraphDecoder(model, cache, mode="cluster", budget=0.3, window=4, delta=float("inf"), check_every=4,
+                               **cfg, **kw)
+            dec.prepare(P)
+            if capture:
+                dec.capture()
+            for t in range(P, P + T):
+                out.append(dec.step(ids[:, t:t + 1], t)[:, -1].float().clone())
+                torch.cuda.synchronize()
+        return torch.stack(out), dec
+
+    a, da = run()
+    b, db = run(fused_insert=True)
+    assert db.insert_all is not None and len(db.attn) > 1
+    assert torch.equal(a, b)
+    for x, y in zip(da.attn, db.attn):
+        end = int(x.end_dev[0])
+        assert torch.equal(x.labels[:, :end], y.labels[:, :end]) and torch.equal(x.count, y.count)
+        assert torch.equal(x.n_c, y.n_c) and x.splits == y.splits
+    if "split_factor" in cfg:
+        assert sum(i.splits for i in db.attn) > 0
+
+
+def test_variance_trigger_in_the_kernel():
+    from ssa.kernels.sphere_fused import SphereIndexFused
+    Q, K = _stream(2600, seed=8)
+    kw = {**KW, "split_factor": 0.0, "var_min": 6}
+    fus, off = SphereIndexFused(**kw, var_factor=1.0), SphereIndexFused(**kw, var_factor=50.0)
+    ref = SphereIndexGPU(**kw, var_factor=1.0)
+    for idx in (fus, off, ref):
+        idx.observe(K, 1000)
+    assert fus.splits == 0 and torch.all(torch.isinf(fus.cap)) and torch.all(fus.vthr > 0)
+    v0 = fus._spread()[fus.count > 0].mean()
+    for n in range(1001, 2600):
+        for idx in (fus, off, ref):
+            idx.observe(K, n)
+    assert off.splits == 0                                                # a threshold no cluster reaches: no splits
+    assert fus.splits > 0 and torch.all(fus.n_c <= 256)
+    assert (fus.n_c - ref.n_c.to(fus.n_c.device)).abs().float().mean() <= 0.15 * (ref.n_c.float().mean() - 64)   # about as many splits as the reference
+    end = fus.end
+    counts = torch.stack([torch.bincount(fus.labels[h, 1:end].long(), minlength=256) for h in range(H_KV)])
+    torch.testing.assert_close(fus.count, counts.float())
+    assert fus._spread()[fus.count >= 2].mean() < v0
+
+
+@pytest.mark.parametrize("capture", [False, True])
+def test_graph_decoder_with_variance_trigger_is_exact_at_full_budget(capture):
+    from ssa.models.graph_decode import GraphDecoder
+    cfg = TinyCfg(head_dim=16, max_position_embeddings=1024, num_attention_heads=4, num_key_value_heads=2)
+    P, T = 200, 400
+    model = tiny_model(cfg, seed=9).to("cuda").eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, P + T + 1), device="cuda", generator=torch.Generator(device="cuda").manual_seed(9))
+
+    def run(mode, **kw):
+        cache = model.alloc_cache(-(-(P + T + 2) // 16) * 16)
+        out = []
+        with torch.inference_mode():
+            model(ids[:, :P], cache, start_pos=0)
+            dec = GraphDecoder(model, cache, mode=mode, **kw)
+            dec.prepare(P)
+            if capture:
+                dec.capture()
+            for t in range(P, P + T):
+                out.append(dec.step(ids[:, t:t + 1], t)[0, -1].float().clone())
+        return torch.stack(out), dec
+
+    ref, _ = run("dense")
+    for fused in (False, True):
+        got, dec = run("cluster", budget=1.0, C=64, C_init=16, var_factor=1.0, var_min=4, window=4, delta=float("inf"),
+                       check_every=4, fused_insert=fused)
+        torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+        assert sum(i.splits for i in dec.attn) > 0

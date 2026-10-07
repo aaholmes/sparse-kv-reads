@@ -169,7 +169,7 @@ def _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir
 
 @triton.jit
 def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr, mmin_ptr, cnt_ptr, ksum_ptr, mu_ptr,
-                rbar_ptr, flag_ptr, cap_ptr, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, start, stop, nbinned,
+                rbar_ptr, flag_ptr, cap_ptr, vthr_ptr, vmin, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, lab_ptr, s_lh, start, stop, nbinned,
                 delta, capk, reset_at, C: tl.constexpr, D: tl.constexpr, BC: tl.constexpr, MS: tl.constexpr,
                 Q8: tl.constexpr):
     h = tl.program_id(0)
@@ -178,6 +178,7 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_pt
     ks = tl.load(ksum_ptr + h * D + offs_d)
     n_act = tl.load(nact_ptr + h).to(tl.int32)             # clusters in use; later slots are spare
     cap = tl.load(cap_ptr + h)
+    vthr = tl.load(vthr_ptr + h)
     for p in range(start, stop):
         k = tl.load(k_ptr + h * s_kh + p * s_kn + offs_d).to(tl.float32)
         ks += k
@@ -212,7 +213,8 @@ def _bin_kernel(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_pt
         tl.store(cnt_ptr + row, cn)
         tl.store(lab_ptr + h * s_lh + p, bi.to(tl.int16))
         tl.debug_barrier()
-        if (cn > tl.maximum(cap, capk * p)) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # over its cap: split it now
+        wide = (1.0 - tl.sum(sd * sd, axis=0) / (cn * cn) > vthr) & (cn >= vmin)       # spread over the threshold
+        if ((cn > tl.maximum(cap, capk * p)) | wide) & (n_act < C) & (cn >= 2.0) & (cn <= MS):   # split it now
             _split_cluster(k_ptr, s_kh, s_kn, dirs_ptr, cent_ptr, s_dh, nact_ptr, sumdir_ptr, qdir_ptr, mmax_ptr,
                            mmin_ptr, cnt_ptr, mu, lab_ptr, s_lh, mem_ptr, proj_ptr, side_ptr, nsplit_ptr, h, bi,
                            n_act, p + 1, C, D, MS, 1024, 64, Q8)
@@ -416,7 +418,8 @@ class SphereIndexFused(SphereIndexGPU):
             _bin_kernel[(self.H_kv,)](
                 K, K.stride(0), K.stride(1), *self._dirs_arg(), self.n_c, self.sum_dir, self._qdir(), self.mmax, self.mmin,
                 self.count,
-                self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self._mem, self._proj, self._side, self.nsplit,
+                self.ksum, self.mu_ref, self.rbar, self.flags, self.cap, self.vthr, float(self.var_min), self._mem,
+                self._proj, self._side, self.nsplit,
                 self.labels, self.labels.stride(0), self.end, new_end, float(new_end - 1), float(self.delta),
                 float(self.capk), self.reset_at or 2 ** 30, C=self.C, D=self.d, BC=self._bc(), MS=self.MS, Q8=self.dir8 is not None, num_warps=4)
             self.end = new_end
