@@ -299,6 +299,7 @@ class AllLayerInsert:
         assert all(i.H_kv == first.H_kv and i.end == first.end for i in layers)
         self.layers, self.L = layers, len(layers)
         self.big = {}
+        torch.cuda.empty_cache()                # stacking an array briefly needs a second copy of it
         for name in STACKED:
             if getattr(first, name, None) is None:
                 continue

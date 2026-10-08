@@ -94,9 +94,9 @@ def _boot_mean(a: list[int], reps: int = 4000, seed: int = 0) -> list[float]:
 
 
 CONDITIONS = [("exact", None, {}),
-              ("cluster_20", "cluster_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03,
+              ("cluster_20", "cluster_fused", {"budget": 0.2, "window": 64, "delta": 0.03,
                                                "group": "sum_share", "check_every": 16, "partition": "kmeans"}),
-              ("cluster_05", "cluster_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03,
+              ("cluster_05", "cluster_fused", {"budget": 0.05, "window": 64, "delta": 0.03,
                                                "group": "sum_share", "check_every": 16, "partition": "kmeans"})]
 
 

@@ -126,15 +126,15 @@ def profile_step(model, ids, cache, n, impl, cfg) -> dict:
 
 
 CONDITIONS = [("dense", {}),
-              ("cluster_fused", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("cluster_fused", {"budget": 0.2, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False}),
-              ("cluster_fused", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share",
+              ("cluster_fused", {"budget": 0.05, "window": 64, "delta": 0.03, "group": "sum_share",
                                 "check_every": 16, "track_reads": False})]
 
 
 GRAPH_CONDITIONS = [("dense", {}),
-                    ("cluster", {"budget": 0.2, "C": 256, "window": 64, "delta": 0.03, "check_every": 16}),
-                    ("cluster", {"budget": 0.05, "C": 256, "window": 64, "delta": 0.03, "check_every": 16})]
+                    ("cluster", {"budget": 0.2, "window": 64, "delta": 0.03, "check_every": 16}),
+                    ("cluster", {"budget": 0.05, "window": 64, "delta": 0.03, "check_every": 16})]
 
 
 def main() -> None:
@@ -156,10 +156,13 @@ def main() -> None:
     p.add_argument("--batch", type=int, default=1, help="sequences decoded together (equal lengths)")
     p.add_argument("--partition", default="kmeans", choices=["random", "kmeans"],
                    help="how clusters are chosen for the cluster graph conditions")
-    p.add_argument("--slots", type=int, default=256, help="cluster slots (C) for the cluster graph conditions")
+    p.add_argument("--slots", type=int, default=None,
+                   help="cluster slots (C) for the cluster graph conditions (default: 1,024 with 256 fitted and splitting on)")
     p.add_argument("--c-init", type=int, default=None, help="clusters fitted at the prompt (default: all slots)")
-    p.add_argument("--split-factor", type=float, default=0.0,
+    p.add_argument("--split-factor", type=float, default=None,
                    help="split a cluster above this multiple of the mean size at the fit (0 = never)")
+    p.add_argument("--no-fused-insert", action="store_true",
+                   help="insert keys with one kernel launch per layer instead of one for all layers")
     p.add_argument("--graph", action="store_true", help="also time CUDA-graph decoding (dense and cluster)")
     p.add_argument("--flashinfer", action="store_true",
                    help="with --graph: also time exact decoding with FlashInfer's paged decode as the attention")
@@ -185,8 +188,9 @@ def main() -> None:
             ref = dense_logits(model, ids, cache, n, warmup=args.warmup, steps=args.steps)
             for mode, cfg in ([("flashinfer", {})] if args.flashinfer else []) + GRAPH_CONDITIONS:
                 if mode == "cluster":
-                    cfg = {**cfg, "partition": args.partition, "C": args.slots, "C_init": args.c_init,
-                           "split_factor": args.split_factor}
+                    cfg = {**cfg, "partition": args.partition, "fused_insert": not args.no_fused_insert,
+                           **{k: v for k, v in (("C", args.slots), ("C_init", args.c_init),
+                                                ("split_factor", args.split_factor)) if v is not None}}
                 r = time_graph(model, ids, cache, n, mode, cfg, warmup=args.warmup, steps=args.steps,
                                repeats=args.repeats, ref_logits=ref)
                 r.update({"n": n, "impl": f"graph_{mode}", "cfg": cfg, "batch": args.batch,

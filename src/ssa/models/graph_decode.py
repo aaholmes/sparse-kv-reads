@@ -27,11 +27,20 @@ from ..kernels.graph_kernels import DenseAttentionGraph, SphereIndexGraph
 
 
 class GraphDecoder:
-    def __init__(self, model, cache, *, mode: str = "dense", budget: float = 0.2, C: int = 256,
-                 window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", C_init: int | None = None, split_factor: float = 0.0, refit_every: int = 0, grow_cap: bool = False, reset_at: int = 0,
-                 summary_bits: int = 8, cap_keys: float = 0.0, fused_insert: bool = False,
+    def __init__(self, model, cache, *, mode: str = "dense", budget: float = 0.2, C: int | None = None,
+                 window: int = 64, delta: float = 0.03, check_every: int = 16, partition: str = "kmeans", C_init: int | None = None, split_factor: float | None = None, refit_every: int = 0, grow_cap: bool = False, reset_at: int = 0,
+                 summary_bits: int = 8, cap_keys: float = 0.0, fused_insert: bool = True,
                  var_factor: float = 0.0, var_min: int = 8, **_):
         cfg = model.cfg
+        # With no slot count given: 1,024 slots, 256 clusters fitted at the prompt, and splitting of
+        # clusters over twice the mean size at the fit. A given ``C`` keeps every slot fitted and
+        # splitting off unless asked for.
+        if C is None:
+            C = 1024 if partition == "kmeans" else 256
+            if partition == "kmeans":
+                C_init = 256 if C_init is None else C_init
+                split_factor = 2.0 if split_factor is None else split_factor
+        split_factor = 0.0 if split_factor is None else split_factor
         self.model, self.cache, self.mode = model, cache, mode
         self.H, self.H_kv, self.d = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         self.B = B = cache.k[0].shape[0]
@@ -62,7 +71,7 @@ class GraphDecoder:
             raise ValueError(f"unknown mode {mode!r}")
         self.graph = None
         self.logits = None
-        self.fused_insert = fused_insert and mode == "cluster"
+        self.fused_insert = fused_insert and mode == "cluster" and window >= 1
         self.insert_all = None
 
     def prepare(self, n: int) -> None:
@@ -72,7 +81,10 @@ class GraphDecoder:
                 idx.prepare(self._heads(self.cache.k[i]), n, self.B * self.H)
             if self.fused_insert:                                      # one insertion launch for all layers
                 from ..kernels.graph_kernels import AllLayerInsert
-                self.insert_all = AllLayerInsert(self.attn, [self._heads(k) for k in self.cache.k[:len(self.attn)]])
+                try:
+                    self.insert_all = AllLayerInsert(self.attn, [self._heads(k) for k in self.cache.k[:len(self.attn)]])
+                except torch.OutOfMemoryError:                         # no room to restack: insert layer by layer
+                    self.insert_all = None                             # (arrays already restacked stay valid views)
 
     def _heads(self, c: torch.Tensor) -> torch.Tensor:
         """Cache ``[B, H_kv, L, d]`` -> ``[B·H_kv, L, d]`` (a view)."""

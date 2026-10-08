@@ -44,7 +44,7 @@ def conditions(budgets=BUDGETS) -> list:
     difference between the two attention implementations."""
     return [("exact", None, {})] + [
         (f"cluster_{int(round(b * 100)):02d}", "cluster_fused",
-         {"budget": b, "C": 256, "window": 64, "delta": 0.03, "group": "sum_share", "check_every": 16,
+         {"budget": b, "window": 64, "delta": 0.03, "group": "sum_share", "check_every": 16,
           "partition": "kmeans"}) for b in budgets]
 
 

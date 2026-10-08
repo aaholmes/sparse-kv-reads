@@ -29,7 +29,7 @@ def build_series(paths, regions: int = 256, only=None) -> dict[str, dict[str, li
         for r in json.loads(Path(p).read_text())["summary"]:
             impl = canonical(r["impl"])
             if impl == "cluster_fused":
-                if r["cfg"].get("partition") != "kmeans" or r["cfg"].get("C") != regions:
+                if r["cfg"].get("partition") != "kmeans" or r["cfg"].get("C", regions) != regions:
                     continue
                 impl = "fitted"
             if impl not in rows or "tvd_ci" not in r:

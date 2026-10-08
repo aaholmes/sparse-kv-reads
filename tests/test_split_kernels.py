@@ -327,3 +327,41 @@ def test_graph_decoder_with_variance_trigger_is_exact_at_full_budget(capture):
                        check_every=4, fused_insert=fused)
         torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
         assert sum(i.splits for i in dec.attn) > 0
+
+
+def test_default_configuration_splits_with_spare_slots_and_is_exact_at_full_budget():
+    from ssa.models.graph_decode import GraphDecoder
+    from ssa.models.patch import install, uninstall
+    cfg = TinyCfg(head_dim=16, max_position_embeddings=2048, num_attention_heads=4, num_key_value_heads=2)
+    P, T = 1200, 200
+    model = tiny_model(cfg, seed=11).to("cuda").eval()
+    ids = torch.randint(0, cfg.vocab_size, (1, P + T + 1), device="cuda", generator=torch.Generator(device="cuda").manual_seed(11))
+
+    def run(mode=None, op=None, **kw):
+        cache = model.alloc_cache(-(-(P + T + 2) // 16) * 16)
+        out = []
+        with torch.inference_mode():
+            model(ids[:, :P], cache, start_pos=0)
+            if op:
+                install(model, op, **kw)
+                for t in range(P, P + T):
+                    out.append(model(ids[:, t:t + 1], cache)[0, -1].float().clone())
+                uninstall(model)
+                return torch.stack(out), None
+            dec = GraphDecoder(model, cache, mode=mode, **kw)
+            dec.prepare(P)
+            dec.capture()
+            for t in range(P, P + T):
+                out.append(dec.step(ids[:, t:t + 1], t)[0, -1].float().clone())
+        return torch.stack(out), dec
+
+    ref, _ = run("dense")
+    got, dec = run("cluster", budget=1.0, window=4)
+    idx = dec.attn[0]
+    assert (idx.C, idx.C_init, idx.split_factor, idx.summary_bits) == (1024, 256, 2.0, 8) and dec.insert_all is not None
+    torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+    assert int(idx.n_c.max()) > 256                                        # clusters were added by splitting
+    got, _ = run(op="cluster_fused", budget=1.0, window=4, capacity=2048)
+    torch.testing.assert_close(got, ref, rtol=2e-2, atol=2e-2)
+    _, dec = run("cluster", budget=0.5, C=64, window=4)                    # a given slot count: all fitted, no splitting
+    assert dec.attn[0].C_init == 64 and dec.attn[0].split_factor == 0.0

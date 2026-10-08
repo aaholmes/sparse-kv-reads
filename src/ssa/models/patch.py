@@ -112,11 +112,13 @@ def make_decode_op(impl: str, *, base_seed: int, stats: ReadStats, cfg: dict):
     fused = None
     if impl in ("cluster_fused", "cluster_tail_sample"):       # fused Triton kernels, one index per layer
         from ..kernels.sphere_fused import SphereIndexFused
-        fused = SphereIndexFused(C=int(cfg.get("C", 256)), window=int(cfg.get("window", 64)),
+        part = cfg.get("partition", "kmeans")
+        default = cfg.get("C") is None and part == "kmeans"      # 1,024 slots, 256 fitted, splitting on
+        fused = SphereIndexFused(C=int(cfg.get("C") or (1024 if part == "kmeans" else 256)), window=int(cfg.get("window", 64)),
                                  delta=float(cfg.get("delta", 0.03)), capacity=int(cfg.get("capacity", 65536)),
                                  check_every=int(cfg.get("check_every", 16)), seed=int(cfg.get("seed", 0)),
-                                 partition=cfg.get("partition", "kmeans"), C_init=cfg.get("C_init"),
-                                 split_factor=float(cfg.get("split_factor", 0.0)),
+                                 partition=part, C_init=cfg.get("C_init", 256 if default else None),
+                                 split_factor=float(cfg.get("split_factor", 2.0 if default else 0.0)),
                                  summary_bits=int(cfg.get("summary_bits", 8)),
                                  cap_keys=float(cfg.get("cap_keys", 0.0)))
         track = bool(cfg.get("track_reads", True))
